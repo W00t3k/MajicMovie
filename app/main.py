@@ -85,6 +85,7 @@ from app.models import (
 from app.auth.dependencies import AdminUser, AuthenticatedUser
 from app.auth.router import auth_router, set_memory_store
 from app.services.embedding import EmbeddingService
+from app.services.enrichment_service import EnrichmentService
 from app.services.llm_explainer import get_explainer
 from app.services.memory_store import MemoryStore
 from app.services.mood_engine import get_all_moods, get_mood, filter_movies_by_mood, infer_user_moods
@@ -476,7 +477,7 @@ def _build_runtime() -> tuple[MemoryStore, SwarmOrchestrator]:
         llm_client=llm_client if llm_client.available else None,
         memory_store=memory_store,
     )
-    return memory_store, swarm
+    return memory_store, swarm, poster_lookup_client
 
 
 app = FastAPI(title=settings.app_title)
@@ -487,7 +488,8 @@ app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="stat
 app.include_router(auth_router)
 
 runtime_lock = asyncio.Lock()
-memory_store, swarm = _build_runtime()
+memory_store, swarm, poster_lookup_client = _build_runtime()
+enrichment_service = EnrichmentService(memory_store, poster_lookup_client)
 plex_station_service = PlexStationService()
 plex_channel_schedule = PlexChannelScheduleService(project_root / settings.data_dir / "plex_channel_schedule.json")
 plex_channel_scheduler_stop = asyncio.Event()
@@ -499,9 +501,12 @@ set_memory_store(memory_store)
 
 
 async def _reload_runtime() -> None:
-    global memory_store, swarm
+    global memory_store, swarm, poster_lookup_client, enrichment_service
     async with runtime_lock:
-        memory_store, swarm = _build_runtime()
+        enrichment_service.stop()
+        memory_store, swarm, poster_lookup_client = _build_runtime()
+        enrichment_service = EnrichmentService(memory_store, poster_lookup_client)
+        enrichment_service.start()
 
 
 async def _run_plex_channel_scheduler_loop() -> None:
@@ -539,6 +544,9 @@ async def _on_startup() -> None:
     plex_channel_scheduler_stop.clear()
     if plex_channel_scheduler_task is None or plex_channel_scheduler_task.done():
         plex_channel_scheduler_task = asyncio.create_task(_run_plex_channel_scheduler_loop())
+    # Start background movie enrichment
+    enrichment_service.start()
+    logger.info("Background enrichment service started")
 
 
 @app.on_event("shutdown")
@@ -546,6 +554,9 @@ async def _on_shutdown() -> None:
     """Graceful shutdown with proper cleanup."""
     global plex_channel_scheduler_task
     logger.info("Initiating graceful shutdown...")
+
+    # Stop enrichment service
+    enrichment_service.stop()
 
     # Stop background scheduler
     plex_channel_scheduler_stop.set()
@@ -1123,6 +1134,43 @@ async def tv_page(request: Request) -> HTMLResponse:
     )
 
 
+def _apply_enrichment_cache(recommendations: list) -> list:
+    """Apply cached enrichment data to recommendations and queue unenriched movies."""
+    for rec in recommendations:
+        movie = rec.movie if hasattr(rec, "movie") else rec.get("movie")
+        if not movie:
+            continue
+
+        title = movie.title if hasattr(movie, "title") else movie.get("title")
+        year = movie.year if hasattr(movie, "year") else movie.get("year")
+        if not title:
+            continue
+
+        # Check cache
+        cached = memory_store.get_movie_cache(title, year)
+        if cached:
+            # Apply cached data if missing
+            if hasattr(movie, "poster_url"):
+                if not movie.poster_url and cached.get("poster_url"):
+                    movie.poster_url = cached["poster_url"]
+                if not movie.overview and cached.get("overview"):
+                    movie.overview = cached["overview"]
+                if cached.get("available_usenet"):
+                    movie.available_on_usenet = True
+            else:
+                if not movie.get("poster_url") and cached.get("poster_url"):
+                    movie["poster_url"] = cached["poster_url"]
+                if not movie.get("overview") and cached.get("overview"):
+                    movie["overview"] = cached["overview"]
+                if cached.get("available_usenet"):
+                    movie["available_on_usenet"] = True
+        else:
+            # Queue for enrichment
+            memory_store.set_movie_cache(title=title, year=year)
+
+    return recommendations
+
+
 @app.get("/api/recommendations", response_model=RecommendationResponse)
 async def get_recommendations(
     user_id: str = Query(default="default"),
@@ -1139,7 +1187,7 @@ async def get_recommendations(
     release_date_to = _parse_date_query(release_to)
     if release_date_from and release_date_to and release_date_from > release_date_to:
         release_date_from, release_date_to = release_date_to, release_date_from
-    return await swarm.recommend_filtered(
+    response = await swarm.recommend_filtered(
         user_id=user_id,
         count=count,
         sort_mode=sort,
@@ -1149,6 +1197,9 @@ async def get_recommendations(
         year_from=year_from,
         year_to=year_to,
     )
+    # Apply cached enrichment and queue unenriched movies
+    _apply_enrichment_cache(response.recommendations)
+    return response
 
 
 @app.get("/api/recommendations/stream")
@@ -4065,6 +4116,7 @@ async def get_data_freshness() -> dict:
                 "items": criterion_job["items_processed"] if criterion_job else 0,
             },
         },
+        "enrichment": enrichment_service.stats(),
     }
 
 

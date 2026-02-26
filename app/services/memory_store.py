@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Generator
 
 from app.models import FeedbackInput, FeedbackRow, SeenMovieInput, SeenMovieRow
 from app.services.embedding import EmbeddingService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -17,16 +23,55 @@ class SimilarFeedback:
 
 
 class MemoryStore:
+    """SQLite-backed memory store with thread-local connection pooling."""
+
     def __init__(self, db_path: Path, embedding_service: EmbeddingService):
         self._db_path = db_path
         self._embedding_service = embedding_service
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        # Thread-local storage for connections
+        self._local = threading.local()
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        """Get or create a thread-local connection with optimizations."""
+        # Check if we already have a connection for this thread
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            conn = sqlite3.connect(
+                self._db_path,
+                check_same_thread=False,
+                timeout=30.0,  # 30-second timeout for lock acquisition
+            )
+            conn.row_factory = sqlite3.Row
+            # Enable WAL mode for better concurrency
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA cache_size=10000")  # ~40MB cache
+            conn.execute("PRAGMA temp_store=MEMORY")
+            self._local.conn = conn
+            logger.debug(f"Created new SQLite connection for thread {threading.current_thread().name}")
+        return self._local.conn
+
+    @contextmanager
+    def _transaction(self) -> Generator[sqlite3.Connection, None, None]:
+        """Context manager for database transactions with automatic rollback on error."""
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    def close(self) -> None:
+        """Close the thread-local connection if it exists."""
+        if hasattr(self._local, "conn") and self._local.conn is not None:
+            try:
+                self._local.conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
+            logger.debug(f"Closed SQLite connection for thread {threading.current_thread().name}")
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -147,6 +192,28 @@ class MemoryStore:
                     synced_at TEXT DEFAULT CURRENT_TIMESTAMP
                 )
                 """
+            )
+
+            # Movie enrichment cache
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS movie_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title_key TEXT UNIQUE NOT NULL,
+                    title TEXT NOT NULL,
+                    year INTEGER,
+                    poster_url TEXT,
+                    overview TEXT,
+                    genres TEXT,
+                    release_date TEXT,
+                    rt_score INTEGER,
+                    available_usenet INTEGER DEFAULT 0,
+                    enriched_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_movie_cache_title ON movie_cache(title_key)"
             )
 
             # Run migrations for existing databases
@@ -391,6 +458,61 @@ class MemoryStore:
         avg = sum(positive) / len(positive)
         normalized = max(min(avg, 1.0), 0.0)
         return normalized, top
+
+    async def liked_rag_search(
+        self,
+        user_id: str,
+        query: str,
+        top_k: int = 8,
+    ) -> list[dict]:
+        """Semantic search over liked feedback entries."""
+        query_text = (query or "").strip()
+        if not query_text:
+            return []
+
+        query_embedding = await self._embedding_service.embed(query_text)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT title, year, note, genres_json, overview, embedding_json, created_at
+                FROM feedback
+                WHERE user_id = ? AND liked = 1
+                ORDER BY created_at DESC
+                LIMIT 500
+                """,
+                (user_id,),
+            ).fetchall()
+
+        scored: list[dict] = []
+        for row in rows:
+            emb = json.loads(row["embedding_json"])
+            sim = self._embedding_service.cosine_similarity(query_embedding, emb)
+            scored.append(
+                {
+                    "title": row["title"],
+                    "year": row["year"],
+                    "note": row["note"],
+                    "genres": json.loads(row["genres_json"] or "[]"),
+                    "overview": row["overview"],
+                    "similarity": float(sim),
+                    "created_at": row["created_at"],
+                }
+            )
+
+        scored.sort(key=lambda item: item["similarity"], reverse=True)
+        return scored[: max(1, min(top_k, 50))]
+
+    def liked_feedback_count(self, user_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM feedback
+                WHERE user_id = ? AND liked = 1
+                """,
+                (user_id,),
+            ).fetchone()
+        return int(row["count"] if row else 0)
 
     @staticmethod
     def _compose_embedding_text(title: str, overview: str | None, genres: list[str]) -> str:
@@ -730,3 +852,105 @@ class MemoryStore:
                 (user_id, credential_key),
             )
         return cursor.rowcount > 0
+
+    # ===== Movie Enrichment Cache =====
+
+    @staticmethod
+    def _movie_key(title: str, year: int | None) -> str:
+        """Generate a unique key for a movie."""
+        import re
+        normalized = re.sub(r"[^a-z0-9]+", "", title.lower())
+        return f"{normalized}:{year or 0}"
+
+    def get_movie_cache(self, title: str, year: int | None) -> dict | None:
+        """Get cached enrichment data for a movie."""
+        key = self._movie_key(title, year)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT title, year, poster_url, overview, genres, release_date,
+                       rt_score, available_usenet, enriched_at
+                FROM movie_cache WHERE title_key = ?
+                """,
+                (key,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "title": row["title"],
+            "year": row["year"],
+            "poster_url": row["poster_url"],
+            "overview": row["overview"],
+            "genres": json.loads(row["genres"]) if row["genres"] else [],
+            "release_date": row["release_date"],
+            "rt_score": row["rt_score"],
+            "available_usenet": bool(row["available_usenet"]),
+            "enriched_at": row["enriched_at"],
+        }
+
+    def set_movie_cache(
+        self,
+        title: str,
+        year: int | None,
+        poster_url: str | None = None,
+        overview: str | None = None,
+        genres: list[str] | None = None,
+        release_date: str | None = None,
+        rt_score: int | None = None,
+        available_usenet: bool = False,
+    ) -> None:
+        """Cache enrichment data for a movie."""
+        key = self._movie_key(title, year)
+        genres_json = json.dumps(genres) if genres else None
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO movie_cache (title_key, title, year, poster_url, overview,
+                                         genres, release_date, rt_score, available_usenet)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(title_key) DO UPDATE SET
+                    poster_url = COALESCE(excluded.poster_url, movie_cache.poster_url),
+                    overview = COALESCE(excluded.overview, movie_cache.overview),
+                    genres = COALESCE(excluded.genres, movie_cache.genres),
+                    release_date = COALESCE(excluded.release_date, movie_cache.release_date),
+                    rt_score = COALESCE(excluded.rt_score, movie_cache.rt_score),
+                    available_usenet = excluded.available_usenet,
+                    enriched_at = CURRENT_TIMESTAMP
+                """,
+                (key, title, year, poster_url, overview, genres_json,
+                 release_date, rt_score, 1 if available_usenet else 0),
+            )
+
+    def get_unenriched_movies(self, limit: int = 100) -> list[dict]:
+        """Get movies that need enrichment (missing poster or overview)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT title_key, title, year FROM movie_cache
+                WHERE poster_url IS NULL OR overview IS NULL
+                ORDER BY enriched_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [{"title_key": r["title_key"], "title": r["title"], "year": r["year"]} for r in rows]
+
+    def movie_cache_stats(self) -> dict:
+        """Get statistics about the movie cache."""
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM movie_cache").fetchone()[0]
+            with_poster = conn.execute(
+                "SELECT COUNT(*) FROM movie_cache WHERE poster_url IS NOT NULL"
+            ).fetchone()[0]
+            with_overview = conn.execute(
+                "SELECT COUNT(*) FROM movie_cache WHERE overview IS NOT NULL"
+            ).fetchone()[0]
+            available = conn.execute(
+                "SELECT COUNT(*) FROM movie_cache WHERE available_usenet = 1"
+            ).fetchone()[0]
+        return {
+            "total": total,
+            "with_poster": with_poster,
+            "with_overview": with_overview,
+            "available_usenet": available,
+        }
