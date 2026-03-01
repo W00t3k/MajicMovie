@@ -11,7 +11,7 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@400;600;700;800&family=Outfit:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260224a" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260228k" />
   </head>
   <body>
     <div class="app">
@@ -74,7 +74,15 @@
 
       <div id="radarr-status" class="status-banner"></div>
       <div id="api-stats" class="api-stats" hidden>
-        <span id="api-stats-text">Loading...</span>
+        <div class="api-stats-header">
+          <span id="api-stats-text">Loading...</span>
+          <span class="api-stats-legend">
+            <span class="legend-item"><span class="pulse-dot done"></span> Loaded</span>
+            <span class="legend-item"><span class="pulse-dot fetching"></span> Fetching</span>
+            <span class="legend-item"><span class="pulse-dot failed"></span> Missing</span>
+          </span>
+        </div>
+        <div id="api-stats-details" class="api-stats-details" hidden></div>
       </div>
 
       <div class="layout">
@@ -127,12 +135,12 @@
                 <h4>Filter by Year</h4>
                 <button type="button" id="clear-year-btn" class="btn btn-ghost btn-sm">Clear</button>
               </div>
-              <div class="year-display" id="year-display">Any Year</div>
+              <div class="year-display" id="year-display">All Years</div>
               <div class="year-slider-wrap">
-                <input type="range" id="year-slider" min="1900" max="2026" value="2026" step="1" />
+                <input type="range" id="year-slider" min="1900" max="2028" value="2028" step="1" />
                 <div class="year-slider-labels">
                   <span>1900</span>
-                  <span>2026</span>
+                  <span id="year-slider-max-label">2028</span>
                 </div>
               </div>
             </div>
@@ -344,10 +352,10 @@
             </div>
 
             <div class="availability-filters" id="availability-filters">
-              <button type="button" class="availability-toggle" data-filter="all">
+              <button type="button" class="availability-toggle active" data-filter="all">
                 🎥 All
               </button>
-              <button type="button" class="availability-toggle active" data-filter="ready">
+              <button type="button" class="availability-toggle" data-filter="ready">
                 <span class="toggle-icon">⚡</span>
                 Ready
               </button>
@@ -446,6 +454,88 @@
       </div>
     </div>
 
+    <!-- Quality Selection Modal -->
+    <div id="quality-modal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-dialog quality-modal-content">
+        <button class="modal-close" type="button" aria-label="Close">✕</button>
+        <div class="modal-body">
+          <div class="quality-modal-header">
+            <div>
+              <h3 id="quality-modal-title" class="quality-modal-title">Select Quality</h3>
+              <p id="quality-modal-subtitle" class="quality-modal-subtitle"></p>
+            </div>
+          </div>
+
+          <!-- Quality Presets -->
+          <div class="quality-presets">
+            <span class="quality-presets-label">Quick:</span>
+            <button type="button" class="quality-preset-btn" data-preset="4k-dv-small">4K DV (6-16GB)</button>
+            <button type="button" class="quality-preset-btn" data-preset="4k-dv">4K Dolby Vision</button>
+            <button type="button" class="quality-preset-btn" data-preset="4k-hdr">4K HDR</button>
+            <button type="button" class="quality-preset-btn" data-preset="1080p-small">1080p (2-6GB)</button>
+            <button type="button" class="quality-preset-btn" data-preset="remux">Remux</button>
+          </div>
+
+          <!-- Quality Filters -->
+          <div class="quality-filters">
+            <div class="quality-filter-row">
+              <div class="quality-filter-group">
+                <label>Resolution</label>
+                <div class="quality-filter-buttons" id="quality-res-filter">
+                  <button type="button" class="quality-filter-btn active" data-value="all">All</button>
+                  <button type="button" class="quality-filter-btn" data-value="2160p">4K</button>
+                  <button type="button" class="quality-filter-btn" data-value="1080p">1080p</button>
+                  <button type="button" class="quality-filter-btn" data-value="720p">720p</button>
+                </div>
+              </div>
+              <div class="quality-filter-group">
+                <label>HDR</label>
+                <div class="quality-filter-buttons" id="quality-hdr-filter">
+                  <button type="button" class="quality-filter-btn active" data-value="all">All</button>
+                  <button type="button" class="quality-filter-btn" data-value="dv">DV</button>
+                  <button type="button" class="quality-filter-btn" data-value="hdr10plus">HDR10+</button>
+                  <button type="button" class="quality-filter-btn" data-value="hdr">HDR</button>
+                  <button type="button" class="quality-filter-btn" data-value="sdr">SDR</button>
+                </div>
+              </div>
+            </div>
+            <div class="quality-filter-row">
+              <div class="quality-filter-group quality-filter-size">
+                <label>Size Range</label>
+                <div class="quality-size-inputs">
+                  <input type="number" id="quality-size-min" placeholder="Min" min="0" max="500" step="1" />
+                  <span class="quality-size-separator">—</span>
+                  <input type="number" id="quality-size-max" placeholder="Max" min="0" max="500" step="1" />
+                  <span class="quality-size-unit">GB</span>
+                </div>
+              </div>
+              <div class="quality-filter-group">
+                <label>Source</label>
+                <div class="quality-filter-buttons" id="quality-source-filter">
+                  <button type="button" class="quality-filter-btn active" data-value="all">All</button>
+                  <button type="button" class="quality-filter-btn" data-value="remux">Remux</button>
+                  <button type="button" class="quality-filter-btn" data-value="bluray">BluRay</button>
+                  <button type="button" class="quality-filter-btn" data-value="web">WEB</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="quality-releases-container">
+            <div class="quality-loading">Searching for releases...</div>
+          </div>
+          <div class="quality-modal-footer">
+            <div id="quality-footer-info" class="quality-footer-info"></div>
+            <div class="quality-footer-actions">
+              <button id="quality-clear-filters" class="quality-cancel-btn" type="button">Clear Filters</button>
+              <button id="quality-cancel-btn" class="quality-cancel-btn" type="button">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Login Modal -->
     <div id="login-modal" class="modal hidden" aria-hidden="true">
       <div class="modal-backdrop"></div>
@@ -475,6 +565,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=20260224a" defer></script>
+    <script src="/static/app.js?v=20260228k" defer></script>
   </body>
 </html>

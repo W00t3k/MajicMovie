@@ -29,8 +29,15 @@ class ParsedRelease:
     is_criterion: bool = False
     is_remux: bool = False
     is_hdr: bool = False
+    is_dolby_vision: bool = False
+    is_hdr10: bool = False
+    is_hdr10_plus: bool = False
     is_tv_release: bool = False
     raw_title: str = ""
+    size_bytes: int | None = None
+    size_human: str | None = None
+    link: str | None = None
+    indexer: str | None = None
     score: int = field(default=0)
 
     def __post_init__(self) -> None:
@@ -75,9 +82,17 @@ class ParsedRelease:
         }
         score += audio_scores.get(self.audio, 0)
 
-        # Bonuses
-        if self.is_hdr:
+        # HDR bonuses (Dolby Vision is highest quality)
+        if self.is_dolby_vision:
+            score += 35
+        elif self.is_hdr10_plus:
+            score += 28
+        elif self.is_hdr10:
+            score += 22
+        elif self.is_hdr:
             score += 20
+
+        # Other bonuses
         if self.is_remux:
             score += 30
         if self.is_criterion:
@@ -146,6 +161,13 @@ EXTENDED_PATTERN = re.compile(r"\bEXTENDED\b", re.I)
 DIRECTORS_CUT_PATTERN = re.compile(r"\b(DIRECTORS?[._-]?CUT|DC)\b", re.I)
 CRITERION_PATTERN = re.compile(r"\bCRITERION\b", re.I)
 REMUX_PATTERN = re.compile(r"\bREMUX\b", re.I)
+
+# HDR patterns - separate types for precise detection
+DOLBY_VISION_PATTERN = re.compile(r"\b(DV|DoVi|Dolby[._-]?Vision)\b", re.I)
+HDR10_PLUS_PATTERN = re.compile(r"\bHDR10\+\b", re.I)
+HDR10_PATTERN = re.compile(r"\bHDR10\b", re.I)
+HDR_GENERIC_PATTERN = re.compile(r"\bHDR\b", re.I)
+# Legacy combined pattern for backwards compatibility
 HDR_PATTERN = re.compile(r"\b(HDR|HDR10\+?|DV|Dolby[._-]?Vision)\b", re.I)
 
 # Release group pattern (typically at the end after a dash)
@@ -231,7 +253,12 @@ def parse_release(raw_title: str) -> ParsedRelease:
     is_directors_cut = bool(DIRECTORS_CUT_PATTERN.search(normalized))
     is_criterion = bool(CRITERION_PATTERN.search(normalized))
     is_remux = bool(REMUX_PATTERN.search(normalized))
-    is_hdr = bool(HDR_PATTERN.search(normalized))
+
+    # Extract HDR type flags (from most specific to least)
+    is_dolby_vision = bool(DOLBY_VISION_PATTERN.search(normalized))
+    is_hdr10_plus = bool(HDR10_PLUS_PATTERN.search(normalized))
+    is_hdr10 = bool(HDR10_PATTERN.search(normalized)) and not is_hdr10_plus
+    is_hdr = bool(HDR_GENERIC_PATTERN.search(normalized)) or is_dolby_vision or is_hdr10 or is_hdr10_plus
 
     # Extract release group
     release_group = None
@@ -261,6 +288,9 @@ def parse_release(raw_title: str) -> ParsedRelease:
         is_criterion=is_criterion,
         is_remux=is_remux,
         is_hdr=is_hdr,
+        is_dolby_vision=is_dolby_vision,
+        is_hdr10=is_hdr10,
+        is_hdr10_plus=is_hdr10_plus,
         is_tv_release=is_tv_release,
         raw_title=raw_title,
     )
@@ -308,3 +338,77 @@ def parse_and_deduplicate(raw_titles: list[str]) -> list[ParsedRelease]:
     """Parse multiple releases and return deduplicated best versions."""
     parsed = [parse_release(title) for title in raw_titles]
     return deduplicate_releases(parsed)
+
+
+def parse_release_with_metadata(
+    raw_title: str,
+    size_bytes: int | None = None,
+    size_human: str | None = None,
+    link: str | None = None,
+    indexer: str | None = None,
+) -> ParsedRelease:
+    """Parse a release title with additional metadata from the indexer."""
+    release = parse_release(raw_title)
+    release.size_bytes = size_bytes
+    release.size_human = size_human
+    release.link = link
+    release.indexer = indexer
+    return release
+
+
+def release_to_dict(release: ParsedRelease) -> dict:
+    """Convert a ParsedRelease to a dictionary for API responses."""
+    # Build HDR label
+    hdr_label = None
+    if release.is_dolby_vision:
+        hdr_label = "Dolby Vision"
+    elif release.is_hdr10_plus:
+        hdr_label = "HDR10+"
+    elif release.is_hdr10:
+        hdr_label = "HDR10"
+    elif release.is_hdr:
+        hdr_label = "HDR"
+
+    # Build view URL for the indexer's details page
+    view_url = None
+    if release.link:
+        if release.indexer == "nzbgeek" and "id=" in release.link:
+            # Extract NZB ID and build details URL
+            import re
+            match = re.search(r"id=([a-f0-9]+)", release.link)
+            if match:
+                view_url = f"https://nzbgeek.info/geekseek.php?guid={match.group(1)}"
+        elif release.indexer == "drunkenslug" and "/getnzb/" in release.link:
+            # Extract GUID and build details URL
+            import re
+            match = re.search(r"/getnzb/([a-f0-9]+)", release.link)
+            if match:
+                view_url = f"https://drunkenslug.com/details/{match.group(1)}"
+
+    return {
+        "title": release.title,
+        "raw_title": release.raw_title,
+        "year": release.year,
+        "quality": release.quality,
+        "source": release.source,
+        "codec": release.codec,
+        "audio": release.audio,
+        "is_hdr": release.is_hdr,
+        "is_dolby_vision": release.is_dolby_vision,
+        "is_hdr10": release.is_hdr10,
+        "is_hdr10_plus": release.is_hdr10_plus,
+        "hdr_label": hdr_label,
+        "is_remux": release.is_remux,
+        "is_extended": release.is_extended,
+        "is_directors_cut": release.is_directors_cut,
+        "is_criterion": release.is_criterion,
+        "is_proper": release.is_proper,
+        "is_repack": release.is_repack,
+        "release_group": release.release_group,
+        "size_bytes": release.size_bytes,
+        "size_human": release.size_human,
+        "link": release.link,
+        "view_url": view_url,
+        "indexer": release.indexer,
+        "score": release.score,
+    }

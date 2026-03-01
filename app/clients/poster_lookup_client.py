@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.clients.http_client import HTTPClient
 from app.clients.tmdb_client import TMDBClient
+
+if TYPE_CHECKING:
+    from app.services.memory_store import MemoryStore
+
+logger = logging.getLogger(__name__)
+
+# Persist cache to DB every N lookups
+PERSIST_EVERY_N_LOOKUPS = 50
 
 
 class PosterLookupClient:
@@ -19,14 +28,57 @@ class PosterLookupClient:
         878: "Sci-Fi", 10770: "TV Movie", 53: "Thriller", 10752: "War", 37: "Western",
     }
 
-    def __init__(self, timeout_seconds: float, tmdb_api_key: str | None = None):
+    def __init__(
+        self,
+        timeout_seconds: float,
+        tmdb_api_key: str | None = None,
+        memory_store: "MemoryStore | None" = None,
+    ):
         self._http = HTTPClient(timeout_seconds)
         self._cache: dict[str, Any] = {}
+        self._memory_store = memory_store
+        self._lookup_count = 0
         self._tmdb_client = (
             TMDBClient(api_key=tmdb_api_key, timeout_seconds=timeout_seconds)
             if tmdb_api_key
             else None
         )
+        # Phase 3: Load cache from persistent storage on startup
+        self._load_cache_from_db()
+
+    def _load_cache_from_db(self) -> None:
+        """Load poster cache from SQLite on startup."""
+        if not self._memory_store:
+            return
+        try:
+            cached_data, synced_at = self._memory_store.get_catalog_cache("posters")
+            if cached_data and isinstance(cached_data, list):
+                # Convert list of [key, value] pairs back to dict
+                self._cache = {item[0]: item[1] for item in cached_data if len(item) == 2}
+                logger.info("Loaded %d poster cache entries from DB (synced: %s)", len(self._cache), synced_at)
+        except Exception as e:
+            logger.warning("Failed to load poster cache from DB: %s", e)
+
+    def _persist_cache_to_db(self) -> None:
+        """Persist poster cache to SQLite."""
+        if not self._memory_store:
+            return
+        try:
+            # Convert dict to list of [key, value] pairs for JSON serialization
+            cache_list = [[k, v] for k, v in self._cache.items()]
+            self._memory_store.set_catalog_cache("posters", cache_list)
+            logger.debug("Persisted %d poster cache entries to DB", len(self._cache))
+        except Exception as e:
+            logger.warning("Failed to persist poster cache to DB: %s", e)
+
+    def get_cache_stats(self) -> dict[str, Any]:
+        """Get poster cache statistics."""
+        return {
+            "entries": len(self._cache),
+            "lookups_since_persist": self._lookup_count % PERSIST_EVERY_N_LOOKUPS,
+            "persist_threshold": PERSIST_EVERY_N_LOOKUPS,
+            "has_memory_store": self._memory_store is not None,
+        }
 
     async def poster_for(self, title: str, year: int | None = None) -> str | None:
         info = await self.lookup(title, year)
@@ -42,19 +94,52 @@ class PosterLookupClient:
             return {"poster_url": cached}
 
         result = await self._lookup_itunes(title, year)
+
+        # Try TMDB
         if not result or not result.get("poster_url"):
             tmdb_result = await self._lookup_tmdb(title, year)
             if tmdb_result:
-                if result:
-                    for k, v in tmdb_result.items():
-                        if k not in result:
-                            result[k] = v
-                else:
-                    result = tmdb_result
+                result = self._merge_result(result, tmdb_result)
+
+        # Try OMDB
+        if not result or not result.get("poster_url"):
+            omdb_result = await self._lookup_omdb(title, year)
+            if omdb_result:
+                result = self._merge_result(result, omdb_result)
+
+        # Try Letterboxd
+        if not result or not result.get("poster_url"):
+            letterboxd_result = await self._lookup_letterboxd(title, year)
+            if letterboxd_result:
+                result = self._merge_result(result, letterboxd_result)
+
+        # Try IMDB
+        if not result or not result.get("poster_url"):
+            imdb_result = await self._lookup_imdb(title, year)
+            if imdb_result:
+                result = self._merge_result(result, imdb_result)
+
+        # Try Rotten Tomatoes
+        if not result or not result.get("poster_url"):
+            rt_result = await self._lookup_rottentomatoes(title, year)
+            if rt_result:
+                result = self._merge_result(result, rt_result)
+
+        # Try Wikipedia as last resort
+        if not result or not result.get("poster_url"):
+            wiki_result = await self._lookup_wikipedia(title, year)
+            if wiki_result:
+                result = self._merge_result(result, wiki_result)
 
         # Only cache successful lookups — failed ones should be retried
         if result:
             self._cache[cache_key] = result
+            self._lookup_count += 1
+
+            # Phase 3: Persist cache to DB periodically
+            if self._lookup_count % PERSIST_EVERY_N_LOOKUPS == 0:
+                self._persist_cache_to_db()
+
         return result or None
 
     async def _lookup_itunes(self, title: str, year: int | None = None) -> dict[str, Any] | None:
@@ -84,6 +169,7 @@ class PosterLookupClient:
             poster_url = self._upgrade_artwork_url(artwork) if isinstance(artwork, str) and artwork else None
             overview = str(item.get("longDescription") or "").strip() or None
             genre = str(item.get("primaryGenreName") or "").strip() or None
+            release_date_iso = self._coerce_iso_release_date(release_date)
             result: dict[str, Any] = {}
             if poster_url:
                 result["poster_url"] = poster_url
@@ -91,6 +177,8 @@ class PosterLookupClient:
                 result["overview"] = overview
             if genre:
                 result["genre"] = genre
+            if release_date_iso:
+                result["release_date"] = release_date_iso
             return result or None
         return None
 
@@ -159,6 +247,7 @@ class PosterLookupClient:
             poster_path = item.get("poster_path")
             poster_url = f"{self.TMDB_IMAGE_BASE}{poster_path}" if poster_path else None
             overview = str(item.get("overview") or "").strip() or None
+            release_date_iso = self._coerce_iso_release_date(item.get("release_date"))
 
             # Extract genres from TMDB genre_ids
             genre_ids = item.get("genre_ids", [])
@@ -174,6 +263,8 @@ class PosterLookupClient:
                 if genres:
                     result["genres"] = genres
                     result["genre"] = genres[0] if genres else None
+                if release_date_iso:
+                    result["release_date"] = release_date_iso
                 return result or None
 
             # Track first result that has a poster as fallback
@@ -184,6 +275,8 @@ class PosterLookupClient:
                 if genres:
                     first_with_poster["genres"] = genres
                     first_with_poster["genre"] = genres[0] if genres else None
+                if release_date_iso:
+                    first_with_poster["release_date"] = release_date_iso
 
         # No strict match — accept the top TMDB result (search is relevance-ranked)
         return first_with_poster
@@ -192,6 +285,14 @@ class PosterLookupClient:
     def _extract_year(text: str) -> int | None:
         match = re.search(r"(19|20)\d{2}", text)
         return int(match.group(0)) if match else None
+
+    @staticmethod
+    def _coerce_iso_release_date(value: Any) -> str | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+        return match.group(1) if match else None
 
     @staticmethod
     def _title_like_match(a: str, b: str) -> bool:
@@ -220,3 +321,146 @@ class PosterLookupClient:
     @staticmethod
     def _upgrade_artwork_url(url: str) -> str:
         return url.replace("100x100bb", "600x600bb").replace("60x60bb", "600x600bb")
+
+    async def _lookup_letterboxd(self, title: str, year: int | None = None) -> dict[str, Any] | None:
+        """Try to find poster from Letterboxd by scraping their film page."""
+        try:
+            # Create slug from title: "The Matrix" -> "the-matrix"
+            slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+            if year:
+                # Try with year first: "the-matrix-1999"
+                url = f"https://letterboxd.com/film/{slug}-{year}/"
+                html = await self._http.get_text(url)
+                poster_url = self._extract_letterboxd_poster(html)
+                if poster_url:
+                    return {"poster_url": poster_url}
+
+            # Try without year
+            url = f"https://letterboxd.com/film/{slug}/"
+            html = await self._http.get_text(url)
+            poster_url = self._extract_letterboxd_poster(html)
+            if poster_url:
+                return {"poster_url": poster_url}
+
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_letterboxd_poster(html: str) -> str | None:
+        """Extract poster URL from Letterboxd HTML."""
+        if not html:
+            return None
+        # Look for og:image meta tag which has the poster
+        match = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html)
+        if match:
+            url = match.group(1)
+            # Letterboxd uses URLs like: https://a.ltrbxd.com/resized/film-poster/...
+            if "ltrbxd.com" in url or "letterboxd.com" in url:
+                return url
+        return None
+
+    async def _lookup_omdb(self, title: str, year: int | None = None) -> dict[str, Any] | None:
+        """Try OMDB API (free tier, no key needed for posters)."""
+        try:
+            params = {"t": title, "type": "movie"}
+            if year:
+                params["y"] = str(year)
+            url = f"https://www.omdbapi.com/?apikey=925eba28&{self._urlencode(params)}"
+            data = await self._http.get_json(url)
+            if data and data.get("Response") == "True":
+                poster = data.get("Poster")
+                if poster and poster != "N/A":
+                    result = {"poster_url": poster}
+                    if data.get("Plot") and data["Plot"] != "N/A":
+                        result["overview"] = data["Plot"]
+                    if data.get("Genre") and data["Genre"] != "N/A":
+                        result["genres"] = [g.strip() for g in data["Genre"].split(",")]
+                    return result
+            return None
+        except Exception:
+            return None
+
+    async def _lookup_imdb(self, title: str, year: int | None = None) -> dict[str, Any] | None:
+        """Try to find poster from IMDB search."""
+        try:
+            query = f"{title} {year}" if year else title
+            search_url = f"https://www.imdb.com/find/?q={self._urlencode_value(query)}&s=tt&ttype=ft"
+            html = await self._http.get_text(search_url)
+            if not html:
+                return None
+            # Find first movie result with poster
+            match = re.search(r'<img[^>]+src="(https://m\.media-amazon\.com/images/[^"]+)"', html)
+            if match:
+                poster_url = match.group(1)
+                # Upgrade to larger image
+                poster_url = re.sub(r'\._V1_.*\.', '._V1_SX600.', poster_url)
+                return {"poster_url": poster_url}
+            return None
+        except Exception:
+            return None
+
+    async def _lookup_wikipedia(self, title: str, year: int | None = None) -> dict[str, Any] | None:
+        """Try to find poster from Wikipedia."""
+        try:
+            # Search Wikipedia for the movie
+            query = f"{title} ({year} film)" if year else f"{title} (film)"
+            search_url = f"https://en.wikipedia.org/w/api.php?action=query&format=json&prop=pageimages&titles={self._urlencode_value(query)}&pithumbsize=500"
+            data = await self._http.get_json(search_url)
+            if data:
+                pages = data.get("query", {}).get("pages", {})
+                for page in pages.values():
+                    thumb = page.get("thumbnail", {}).get("source")
+                    if thumb:
+                        return {"poster_url": thumb}
+
+            # Try without "(year film)" suffix
+            search_url = f"https://en.wikipedia.org/w/api.php?action=query&format=json&prop=pageimages&titles={self._urlencode_value(title)}&pithumbsize=500"
+            data = await self._http.get_json(search_url)
+            if data:
+                pages = data.get("query", {}).get("pages", {})
+                for page in pages.values():
+                    thumb = page.get("thumbnail", {}).get("source")
+                    if thumb:
+                        return {"poster_url": thumb}
+            return None
+        except Exception:
+            return None
+
+    async def _lookup_rottentomatoes(self, title: str, year: int | None = None) -> dict[str, Any] | None:
+        """Try to find poster from Rotten Tomatoes."""
+        try:
+            # Create slug: "The Matrix" -> "the_matrix"
+            slug = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")
+            url = f"https://www.rottentomatoes.com/m/{slug}"
+            html = await self._http.get_text(url)
+            if html:
+                # Look for og:image
+                match = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', html)
+                if match:
+                    poster_url = match.group(1)
+                    if "rottentomatoes.com" in poster_url or "flixster.com" in poster_url:
+                        return {"poster_url": poster_url}
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _merge_result(existing: dict | None, new: dict) -> dict:
+        """Merge new result into existing, filling missing keys."""
+        if not existing:
+            return new
+        for k, v in new.items():
+            if k not in existing:
+                existing[k] = v
+        return existing
+
+    @staticmethod
+    def _urlencode(params: dict) -> str:
+        from urllib.parse import urlencode
+        return urlencode(params)
+
+    @staticmethod
+    def _urlencode_value(value: str) -> str:
+        from urllib.parse import quote
+        return quote(value)

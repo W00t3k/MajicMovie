@@ -106,7 +106,7 @@ const CUSTOM_THEME_DEFAULTS = Object.freeze({
 const CUSTOM_THEME_VARS = Object.keys(CUSTOM_THEME_DEFAULTS);
 let downloadHistoryClearedAt = localStorage.getItem(DOWNLOAD_HISTORY_CLEAR_KEY);
 let currentRecommendations = [];
-let availabilityFilter = "unavailable"; // all, ready, unreleased, unavailable (default: Not Ready)
+let availabilityFilter = "all"; // all, ready, unreleased, unavailable (default: All)
 let currentModalMovie = null;
 const RECOMMENDATION_BATCH_SIZE = 8;
 const RECOMMENDATION_OBSERVER_ROOT_MARGIN = "500px 0px";
@@ -141,39 +141,75 @@ const posterFetchInProgress = new Set();
 const apiStats = {
   posterFetches: 0,
   posterSuccesses: 0,
+  posterFailed: 0,
   totalTime: 0,
   inFlight: 0,
+  queue: [], // Track individual poster requests
 };
 
 function updateApiStatsUI() {
   const el = document.getElementById("api-stats");
   const textEl = document.getElementById("api-stats-text");
+  const detailsEl = document.getElementById("api-stats-details");
   if (!el || !textEl) return;
 
-  if (apiStats.inFlight > 0) {
+  const pending = apiStats.queue.filter(p => p.status === "fetching").length;
+  const done = apiStats.queue.filter(p => p.status === "done").length;
+  const failed = apiStats.queue.filter(p => p.status === "failed").length;
+  const total = apiStats.queue.length;
+
+  if (apiStats.inFlight > 0 || total > 0) {
     el.hidden = false;
+    el.classList.add("expanded");
     const avgTime = apiStats.posterFetches > 0 ? Math.round(apiStats.totalTime / apiStats.posterFetches) : 0;
-    textEl.innerHTML = `<span style="color:var(--accent)">●</span> ${apiStats.inFlight} fetching | ${apiStats.posterSuccesses}/${apiStats.posterFetches} posters | avg ${avgTime}ms`;
-  } else if (apiStats.posterFetches > 0) {
-    const avgTime = Math.round(apiStats.totalTime / apiStats.posterFetches);
-    const rate = Math.round((apiStats.posterSuccesses / apiStats.posterFetches) * 100);
-    textEl.textContent = `${apiStats.posterSuccesses}/${apiStats.posterFetches} posters (${rate}%) | avg ${avgTime}ms`;
-    // Hide after 5 seconds of inactivity
-    setTimeout(() => { if (apiStats.inFlight === 0) el.hidden = true; }, 5000);
+    const successRate = apiStats.posterFetches > 0 ? Math.round((apiStats.posterSuccesses / apiStats.posterFetches) * 100) : 0;
+
+    // Status line with live indicator
+    const statusIcon = apiStats.inFlight > 0 ? '<span class="pulse-dot fetching"></span>' : '<span class="pulse-dot done"></span>';
+    textEl.innerHTML = `${statusIcon} Posters: <strong>${done}</strong> loaded, <strong>${pending}</strong> fetching, <strong>${failed}</strong> missing`;
+
+    // Detailed breakdown
+    if (detailsEl) {
+      const progressPct = total > 0 ? Math.round(((done + failed) / total) * 100) : 0;
+      detailsEl.innerHTML = `
+        <div class="poster-progress-bar">
+          <div class="poster-progress-fill success" style="width: ${total > 0 ? (done / total * 100) : 0}%"></div>
+          <div class="poster-progress-fill failed" style="width: ${total > 0 ? (failed / total * 100) : 0}%"></div>
+        </div>
+        <div class="poster-stats-row">
+          <span>Total: ${total}</span>
+          <span>Avg: ${avgTime}ms</span>
+          <span>Rate: ${successRate}%</span>
+        </div>
+      `;
+      detailsEl.hidden = false;
+    }
   } else {
     el.hidden = true;
+    el.classList.remove("expanded");
+    if (detailsEl) detailsEl.hidden = true;
   }
 }
 
-// Fetch poster dynamically for movies without one
-async function fetchPosterDynamic(movie, imageEl, cardNode = null) {
+// Reset poster stats (call when loading new content)
+function resetPosterStats() {
+  apiStats.posterFetches = 0;
+  apiStats.posterSuccesses = 0;
+  apiStats.posterFailed = 0;
+  apiStats.totalTime = 0;
+  apiStats.queue = [];
+  updateApiStatsUI();
+}
+
+// Fetch poster with retry button on failure
+async function fetchPosterWithRetry(movie, imageEl, cardNode) {
   const key = `${movie.title}:${movie.year || ""}`;
   if (posterFetchInProgress.has(key)) return;
   posterFetchInProgress.add(key);
+
   apiStats.inFlight++;
   updateApiStatsUI();
 
-  const startTime = performance.now();
   let success = false;
   try {
     const params = new URLSearchParams({ title: movie.title });
@@ -181,40 +217,63 @@ async function fetchPosterDynamic(movie, imageEl, cardNode = null) {
     const res = await fetch(`/api/poster?${params}`);
     const data = await res.json();
     apiStats.posterFetches++;
-    apiStats.totalTime += performance.now() - startTime;
     if (data.ok && data.poster_url) {
       apiStats.posterSuccesses++;
-      success = true;
-      // Update the image element
       imageEl.src = data.poster_url;
-      // Also update the movie object for future renders
       movie.poster_url = data.poster_url;
-      if (data.overview && !movie.overview) movie.overview = data.overview;
-      if (data.genres && !movie.genres?.length) movie.genres = data.genres;
+      success = true;
+    } else {
+      apiStats.posterFailed++;
     }
   } catch {
     apiStats.posterFetches++;
-    apiStats.totalTime += performance.now() - startTime;
+    apiStats.posterFailed++;
   } finally {
     posterFetchInProgress.delete(key);
     apiStats.inFlight--;
     updateApiStatsUI();
-    // Update poster status badge
-    if (cardNode) {
-      const badge = cardNode.querySelector(".poster-status");
-      if (badge) {
-        badge.classList.remove("fetching");
-        if (success) {
-          badge.classList.add("found");
-          badge.title = "Poster loaded";
-          // Hide after a moment since we have the poster
-          setTimeout(() => badge.remove(), 1500);
-        } else {
-          badge.classList.add("missing");
-          badge.title = "No poster found";
-        }
+
+    // Add retry button if failed
+    if (!success && cardNode) {
+      const frontEl = cardNode.querySelector(".flip-card-front");
+      if (frontEl && !frontEl.querySelector(".poster-retry-btn")) {
+        const btn = document.createElement("button");
+        btn.className = "poster-retry-btn";
+        btn.innerHTML = "↻";
+        btn.title = "Retry poster";
+        btn.onclick = (e) => {
+          e.stopPropagation();
+          btn.disabled = true;
+          btn.innerHTML = "...";
+          manualPosterRetry(movie, imageEl, btn);
+        };
+        frontEl.appendChild(btn);
       }
     }
+  }
+}
+
+// Manual retry - one attempt, then remove button
+async function manualPosterRetry(movie, imageEl, btn) {
+  try {
+    const params = new URLSearchParams({ title: movie.title });
+    if (movie.year) params.set("year", movie.year);
+    params.set("force", "1");
+    const res = await fetch(`/api/poster?${params}`);
+    const data = await res.json();
+    if (data.ok && data.poster_url) {
+      imageEl.src = data.poster_url;
+      movie.poster_url = data.poster_url;
+      btn.remove();
+    } else {
+      btn.innerHTML = "✕";
+      btn.disabled = true;
+      btn.title = "No poster found";
+    }
+  } catch {
+    btn.innerHTML = "✕";
+    btn.disabled = true;
+    btn.title = "Failed";
   }
 }
 
@@ -2475,26 +2534,10 @@ function openMovieModal(rec) {
   if (modalDownloadBtn) {
     modalDownloadBtn.disabled = false;
     modalDownloadBtn.textContent = "\u25B6 Download";
-    modalDownloadBtn.onclick = async () => {
+    modalDownloadBtn.onclick = () => {
       if (modalDownloadBtn.disabled) return;
-      modalDownloadBtn.disabled = true;
-      modalDownloadBtn.textContent = "Sending...";
-      try {
-        const result = await sendDownload(movie);
-        if (result?.status === "queued") {
-          modalDownloadBtn.textContent = "\u2713 Queued!";
-        } else if (result?.status === "exists") {
-          modalDownloadBtn.textContent = "Already tracked";
-        } else if (result?.status === "error") {
-          modalDownloadBtn.textContent = "Error";
-          modalDownloadBtn.title = result.message || "Download service error";
-        } else {
-          modalDownloadBtn.textContent = "\u2713 Sent";
-        }
-        await loadDownloadActivity();
-      } catch (err) {
-        modalDownloadBtn.textContent = "Failed";
-      }
+      // Open quality selection modal
+      openQualityModal(movie);
     };
   }
 
@@ -2762,17 +2805,8 @@ function buildRecommendationCardNode(rec, index) {
     imageEl.src = generatedPosterDataUrl(movie);
     imageEl.style.display = "block";
     if (fallbackEl) fallbackEl.style.display = "none";
-    // Add poster loading indicator
-    const frontEl = node.querySelector(".flip-card-front");
-    if (frontEl) {
-      const posterBadge = document.createElement("div");
-      posterBadge.className = "poster-status fetching";
-      posterBadge.innerHTML = '<span class="poster-dot"></span>';
-      posterBadge.title = "Fetching poster...";
-      frontEl.appendChild(posterBadge);
-    }
-    // Fetch poster on-demand
-    fetchPosterDynamic(movie, imageEl, node);
+    // Fetch poster in background, add retry button if fails
+    fetchPosterWithRetry(movie, imageEl, card);
   }
 
   // --- Download Status Badge ---
@@ -2780,14 +2814,12 @@ function buildRecommendationCardNode(rec, index) {
   if (frontEl) {
     const statusBadge = document.createElement("div");
     statusBadge.className = "download-status";
-    const tags = movie.source_tags || [];
-    const isUsenet = movie.available_on_usenet || tags.some(t => ["nzbgeek", "drunkenslug", "usenet"].includes(t.toLowerCase()));
-    const isUnreleased = tags.some(t => ["unreleased", "upcoming"].includes(t.toLowerCase()));
+    const status = getMovieAvailabilityStatus(movie);
 
-    if (isUsenet) {
+    if (status === "ready") {
       statusBadge.classList.add("ready");
       statusBadge.innerHTML = '<span class="status-icon">⚡</span><span class="status-text">Ready</span>';
-    } else if (isUnreleased) {
+    } else if (status === "unreleased") {
       statusBadge.classList.add("unreleased");
       statusBadge.innerHTML = '<span class="status-icon">🎬</span><span class="status-text">Soon</span>';
     } else {
@@ -2944,28 +2976,10 @@ function buildRecommendationCardNode(rec, index) {
   });
 
   if (dlBtn) {
-    dlBtn.addEventListener("click", async (e) => {
+    dlBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (dlBtn.disabled) return;
-      dlBtn.disabled = true;
-      dlBtn.textContent = "Sending...";
-      try {
-        const result = await sendDownload(movie);
-        if (result?.status === "queued") {
-          dlBtn.textContent = "\u2713 Queued!";
-        } else if (result?.status === "exists") {
-          dlBtn.textContent = "Already tracked";
-        } else if (result?.status === "error") {
-          dlBtn.textContent = "Error";
-          dlBtn.title = result.message || "Download service error";
-        } else {
-          dlBtn.textContent = "\u2713 Sent";
-        }
-        await loadDownloadActivity();
-      } catch (err) {
-        dlBtn.textContent = "Failed";
-        dlBtn.title = err.message || "Download failed";
-      }
+      // Open quality selection modal
+      openQualityModal(movie);
     });
   }
 
@@ -3983,6 +3997,466 @@ function stopDownloadAutoRefresh() {
   }
 }
 
+// ===== Quality Selection Modal =====
+const qualityModal = document.getElementById("quality-modal");
+const qualityModalTitle = document.getElementById("quality-modal-title");
+const qualityModalSubtitle = document.getElementById("quality-modal-subtitle");
+const qualityReleasesContainer = document.getElementById("quality-releases-container");
+const qualityFooterInfo = document.getElementById("quality-footer-info");
+const qualityCancelBtn = document.getElementById("quality-cancel-btn");
+const qualityClearFiltersBtn = document.getElementById("quality-clear-filters");
+const qualitySizeMin = document.getElementById("quality-size-min");
+const qualitySizeMax = document.getElementById("quality-size-max");
+let currentQualityMovie = null;
+let allQualityReleases = []; // Store all releases for filtering
+let qualityFilters = {
+  resolution: "all",
+  hdr: "all",
+  source: "all",
+  sizeMin: null,
+  sizeMax: null,
+};
+
+function openQualityModal(movie) {
+  if (!qualityModal || !movie) return;
+  currentQualityMovie = movie;
+  allQualityReleases = [];
+
+  // Reset filters
+  resetQualityFilters();
+
+  // Set title
+  if (qualityModalTitle) {
+    qualityModalTitle.textContent = `Select Quality: ${movie.title}`;
+  }
+  if (qualityModalSubtitle) {
+    qualityModalSubtitle.textContent = movie.year ? `(${movie.year})` : "";
+  }
+
+  // Show loading state
+  if (qualityReleasesContainer) {
+    qualityReleasesContainer.innerHTML = '<div class="quality-loading">Searching for releases...</div>';
+  }
+  if (qualityFooterInfo) {
+    qualityFooterInfo.textContent = "";
+  }
+
+  // Show modal
+  qualityModal.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+
+  // Fetch releases
+  fetchQualityReleases(movie);
+}
+
+function resetQualityFilters() {
+  qualityFilters = { resolution: "all", hdr: "all", source: "all", sizeMin: null, sizeMax: null };
+
+  // Reset UI
+  document.querySelectorAll(".quality-filter-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.value === "all");
+  });
+  if (qualitySizeMin) qualitySizeMin.value = "";
+  if (qualitySizeMax) qualitySizeMax.value = "";
+}
+
+function applyQualityFilters() {
+  if (!currentQualityMovie || allQualityReleases.length === 0) return;
+
+  const filtered = allQualityReleases.filter(release => {
+    // Resolution filter
+    if (qualityFilters.resolution !== "all") {
+      if (release.quality !== qualityFilters.resolution) return false;
+    }
+
+    // HDR filter
+    if (qualityFilters.hdr !== "all") {
+      if (qualityFilters.hdr === "dv" && !release.is_dolby_vision) return false;
+      if (qualityFilters.hdr === "hdr10plus" && !release.is_hdr10_plus) return false;
+      if (qualityFilters.hdr === "hdr" && !release.is_hdr) return false;
+      if (qualityFilters.hdr === "sdr" && release.is_hdr) return false;
+    }
+
+    // Source filter
+    if (qualityFilters.source !== "all") {
+      const src = (release.source || "").toLowerCase();
+      if (qualityFilters.source === "remux" && !release.is_remux) return false;
+      if (qualityFilters.source === "bluray" && !src.includes("bluray") && !src.includes("blu-ray")) return false;
+      if (qualityFilters.source === "web" && !src.includes("web")) return false;
+    }
+
+    // Size filter (convert bytes to GB) - only filter if release HAS size info
+    if (release.size_bytes && (qualityFilters.sizeMin !== null || qualityFilters.sizeMax !== null)) {
+      const sizeGB = release.size_bytes / (1024 * 1024 * 1024);
+      if (qualityFilters.sizeMin !== null && sizeGB < qualityFilters.sizeMin) return false;
+      if (qualityFilters.sizeMax !== null && sizeGB > qualityFilters.sizeMax) return false;
+    }
+    // If release has no size info, always include it (can't filter unknown)
+
+    return true;
+  });
+
+  // Render filtered results
+  if (filtered.length === 0) {
+    qualityReleasesContainer.innerHTML = `
+      <div class="quality-empty">
+        <div class="quality-empty-icon">🔍</div>
+        <div class="quality-empty-text">No releases match your filters</div>
+        <div class="quality-empty-hint">Try adjusting the filters above</div>
+      </div>
+    `;
+  } else {
+    renderQualityReleases(filtered, currentQualityMovie);
+  }
+
+  // Update footer
+  if (qualityFooterInfo) {
+    qualityFooterInfo.textContent = `${filtered.length} of ${allQualityReleases.length} releases`;
+  }
+}
+
+function closeQualityModal() {
+  if (!qualityModal) return;
+  qualityModal.classList.add("hidden");
+  document.body.style.overflow = "";
+  currentQualityMovie = null;
+}
+
+async function fetchQualityReleases(movie) {
+  if (!qualityReleasesContainer) return;
+
+  try {
+    const yearParam = movie.year ? `?year=${movie.year}` : "";
+    const url = `/api/releases/${encodeURIComponent(movie.title)}${yearParam}`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (!data.ok) {
+      qualityReleasesContainer.innerHTML = `
+        <div class="quality-empty">
+          <div class="quality-empty-icon">⚠</div>
+          <div class="quality-empty-text">Error loading releases</div>
+          <div class="quality-empty-hint">${data.message || "Unknown error"}</div>
+        </div>
+      `;
+      return;
+    }
+
+    const releases = data.releases || [];
+    allQualityReleases = releases; // Store for filtering
+
+    if (releases.length === 0) {
+      qualityReleasesContainer.innerHTML = `
+        <div class="quality-empty">
+          <div class="quality-empty-icon">📭</div>
+          <div class="quality-empty-text">No releases found</div>
+          <div class="quality-empty-hint">Try checking usenet indexers directly or wait for new releases</div>
+        </div>
+      `;
+      // Add fallback download button
+      const fallbackHtml = `
+        <div style="text-align: center; margin-top: 16px;">
+          <button class="quality-dl-btn" id="quality-fallback-dl">Download via Radarr</button>
+        </div>
+      `;
+      qualityReleasesContainer.innerHTML += fallbackHtml;
+      document.getElementById("quality-fallback-dl")?.addEventListener("click", async () => {
+        const btn = document.getElementById("quality-fallback-dl");
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "Adding...";
+        }
+        const result = await sendDownload(movie);
+        if (btn) {
+          btn.textContent = result?.status === "queued" ? "✓ Queued" : "✓ Added";
+        }
+        await loadDownloadActivity();
+        setTimeout(closeQualityModal, 1000);
+      });
+      return;
+    }
+
+    // Render releases
+    renderQualityReleases(releases, movie);
+
+    // Update footer
+    if (qualityFooterInfo) {
+      qualityFooterInfo.textContent = `${releases.length} release${releases.length !== 1 ? "s" : ""} found`;
+    }
+
+    // Show errors if any
+    if (data.errors && data.errors.length > 0) {
+      const errorsHtml = `
+        <div class="quality-errors">
+          ${data.errors.map(e => `<div class="quality-error-item">${escapeXml(e)}</div>`).join("")}
+        </div>
+      `;
+      qualityReleasesContainer.innerHTML += errorsHtml;
+    }
+  } catch (err) {
+    console.error("Failed to fetch releases:", err);
+    qualityReleasesContainer.innerHTML = `
+      <div class="quality-empty">
+        <div class="quality-empty-icon">⚠</div>
+        <div class="quality-empty-text">Failed to load releases</div>
+        <div class="quality-empty-hint">${err.message || "Network error"}</div>
+      </div>
+    `;
+  }
+}
+
+function renderQualityReleases(releases, movie) {
+  if (!qualityReleasesContainer) return;
+
+  const html = `
+    <div class="quality-releases-list">
+      ${releases.map((release, idx) => renderQualityReleaseItem(release, movie, idx)).join("")}
+    </div>
+  `;
+  qualityReleasesContainer.innerHTML = html;
+
+  // Attach click handlers
+  qualityReleasesContainer.querySelectorAll(".quality-dl-btn").forEach((btn, idx) => {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = "Adding...";
+
+      const release = releases[idx];
+      try {
+        const result = await downloadSpecificRelease(movie, release);
+        if (result?.ok) {
+          btn.textContent = "✓ Queued";
+          btn.classList.add("downloading");
+          await loadDownloadActivity();
+          setTimeout(closeQualityModal, 1200);
+        } else {
+          btn.textContent = result?.message || "Error";
+          setTimeout(() => {
+            btn.textContent = "Download";
+            btn.disabled = false;
+          }, 2000);
+        }
+      } catch (err) {
+        btn.textContent = "Error";
+        setTimeout(() => {
+          btn.textContent = "Download";
+          btn.disabled = false;
+        }, 2000);
+      }
+    });
+  });
+}
+
+function renderQualityReleaseItem(release, movie, idx) {
+  const badges = [];
+
+  // Resolution badge
+  if (release.quality && release.quality !== "unknown") {
+    const resClass = release.quality === "2160p" ? "resolution-2160p" : "resolution";
+    badges.push(`<span class="quality-badge ${resClass}">${release.quality}</span>`);
+  }
+
+  // HDR badge
+  if (release.is_dolby_vision) {
+    badges.push(`<span class="quality-badge dolby-vision">Dolby Vision</span>`);
+  } else if (release.is_hdr10_plus) {
+    badges.push(`<span class="quality-badge hdr">HDR10+</span>`);
+  } else if (release.is_hdr10) {
+    badges.push(`<span class="quality-badge hdr">HDR10</span>`);
+  } else if (release.is_hdr) {
+    badges.push(`<span class="quality-badge hdr">HDR</span>`);
+  }
+
+  // Source badge
+  if (release.source && release.source !== "unknown") {
+    badges.push(`<span class="quality-badge source">${release.source}</span>`);
+  }
+
+  // Audio badge
+  if (release.audio && release.audio !== "unknown") {
+    badges.push(`<span class="quality-badge audio">${release.audio}</span>`);
+  }
+
+  // Size badge
+  if (release.size_human) {
+    badges.push(`<span class="quality-badge size">${release.size_human}</span>`);
+  }
+
+  // Indexer badge
+  if (release.indexer) {
+    badges.push(`<span class="quality-badge indexer">${release.indexer}</span>`);
+  }
+
+  // View link to indexer
+  const viewLink = release.view_url
+    ? `<a href="${escapeXml(release.view_url)}" target="_blank" rel="noopener" class="quality-view-link" title="View on ${release.indexer || 'indexer'}">↗</a>`
+    : "";
+
+  return `
+    <div class="quality-release-item" data-idx="${idx}">
+      <div class="quality-release-info">
+        <div class="quality-release-title" title="${escapeXml(release.raw_title || "")}">${escapeXml(release.raw_title || "Unknown release")}${viewLink}</div>
+        <div class="quality-release-badges">
+          ${badges.join("")}
+        </div>
+      </div>
+      <div class="quality-release-score">
+        <span class="quality-score-value">${release.score || 0}</span>
+        <span class="quality-score-label">score</span>
+      </div>
+      <div class="quality-release-action">
+        <button class="quality-dl-btn" type="button">Download</button>
+      </div>
+    </div>
+  `;
+}
+
+async function downloadSpecificRelease(movie, release) {
+  try {
+    const response = await fetch("/api/download-release", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: movie.title,
+        year: movie.year,
+        release_link: release.link,
+        indexer: release.indexer,
+        raw_title: release.raw_title,
+      }),
+    });
+    return await response.json();
+  } catch (err) {
+    console.error("Download release failed:", err);
+    return { ok: false, message: err.message };
+  }
+}
+
+// Setup quality modal event listeners
+if (qualityModal) {
+  const backdrop = qualityModal.querySelector(".modal-backdrop");
+  if (backdrop) backdrop.addEventListener("click", closeQualityModal);
+
+  const closeBtn = qualityModal.querySelector(".modal-close");
+  if (closeBtn) closeBtn.addEventListener("click", closeQualityModal);
+
+  if (qualityCancelBtn) qualityCancelBtn.addEventListener("click", closeQualityModal);
+  if (qualityClearFiltersBtn) qualityClearFiltersBtn.addEventListener("click", () => {
+    resetQualityFilters();
+    applyQualityFilters();
+  });
+
+  // Resolution filter buttons
+  document.querySelectorAll("#quality-res-filter .quality-filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#quality-res-filter .quality-filter-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      qualityFilters.resolution = btn.dataset.value;
+      applyQualityFilters();
+    });
+  });
+
+  // HDR filter buttons
+  document.querySelectorAll("#quality-hdr-filter .quality-filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#quality-hdr-filter .quality-filter-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      qualityFilters.hdr = btn.dataset.value;
+      applyQualityFilters();
+    });
+  });
+
+  // Source filter buttons
+  document.querySelectorAll("#quality-source-filter .quality-filter-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#quality-source-filter .quality-filter-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      qualityFilters.source = btn.dataset.value;
+      applyQualityFilters();
+    });
+  });
+
+  // Size range inputs
+  if (qualitySizeMin) {
+    qualitySizeMin.addEventListener("input", () => {
+      const val = parseFloat(qualitySizeMin.value);
+      qualityFilters.sizeMin = isNaN(val) ? null : val;
+      applyQualityFilters();
+    });
+  }
+  if (qualitySizeMax) {
+    qualitySizeMax.addEventListener("input", () => {
+      const val = parseFloat(qualitySizeMax.value);
+      qualityFilters.sizeMax = isNaN(val) ? null : val;
+      applyQualityFilters();
+    });
+  }
+
+  // Preset buttons
+  document.querySelectorAll(".quality-preset-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const preset = btn.dataset.preset;
+      applyQualityPreset(preset);
+    });
+  });
+}
+
+function applyQualityPreset(preset) {
+  // Reset first
+  resetQualityFilters();
+
+  switch (preset) {
+    case "4k-dv-small":
+      qualityFilters.resolution = "2160p";
+      qualityFilters.hdr = "dv";
+      qualityFilters.sizeMin = 6;
+      qualityFilters.sizeMax = 16;
+      break;
+    case "4k-dv":
+      qualityFilters.resolution = "2160p";
+      qualityFilters.hdr = "dv";
+      break;
+    case "4k-hdr":
+      qualityFilters.resolution = "2160p";
+      qualityFilters.hdr = "hdr";
+      break;
+    case "1080p-small":
+      qualityFilters.resolution = "1080p";
+      qualityFilters.sizeMin = 2;
+      qualityFilters.sizeMax = 6;
+      break;
+    case "remux":
+      qualityFilters.source = "remux";
+      break;
+  }
+
+  // Update UI to reflect preset
+  updateQualityFilterUI();
+  applyQualityFilters();
+}
+
+function updateQualityFilterUI() {
+  // Update resolution buttons
+  document.querySelectorAll("#quality-res-filter .quality-filter-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.value === qualityFilters.resolution);
+  });
+
+  // Update HDR buttons
+  document.querySelectorAll("#quality-hdr-filter .quality-filter-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.value === qualityFilters.hdr);
+  });
+
+  // Update source buttons
+  document.querySelectorAll("#quality-source-filter .quality-filter-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.value === qualityFilters.source);
+  });
+
+  // Update size inputs
+  if (qualitySizeMin) qualitySizeMin.value = qualityFilters.sizeMin ?? "";
+  if (qualitySizeMax) qualitySizeMax.value = qualityFilters.sizeMax ?? "";
+}
+
 // ===== AI Chat =====
 const aiChatCard = document.getElementById("ai-chat-card");
 const aiChatToggle = document.getElementById("ai-chat-toggle");
@@ -4375,12 +4849,18 @@ const resultsCountEl = document.getElementById("results-count");
 const loadAllBtn = document.getElementById("load-all-btn");
 
 let selectedYear = null;
+const CURRENT_YEAR = new Date().getFullYear();
+const MAX_YEAR = CURRENT_YEAR + 2;
 
 function updateYearDisplay(year) {
   if (!yearDisplay) return;
   if (year === null) {
-    yearDisplay.textContent = "Any Year";
+    yearDisplay.textContent = "All Years";
     yearDisplay.style.color = "var(--text-muted)";
+  } else if (typeof year === "string") {
+    // Decade label like "1980s"
+    yearDisplay.textContent = year;
+    yearDisplay.style.color = "var(--primary)";
   } else {
     yearDisplay.textContent = year;
     yearDisplay.style.color = "var(--primary)";
@@ -4407,11 +4887,21 @@ function applyYearFilter(yearFrom, yearTo) {
   // Set hidden inputs for the recommendation API
   if (yearFromEl) yearFromEl.value = yearFrom || "";
   if (yearToEl) yearToEl.value = yearTo || "";
+
+  // When filtering by year, search ALL sources (usenet only has recent movies)
+  if (yearFrom && yearFrom < 2020) {
+    homeSourceSelections.clear(); // Clear = all sources
+    renderHomeSourceFilters();
+  }
+
+  // Reset poster stats for new content
+  resetPosterStats();
   // Trigger recommendations reload
   loadRecommendations();
 }
 
-function handleYearSliderRelease() {
+function handleYearSliderChange() {
+  if (!yearSlider) return;
   const year = parseInt(yearSlider.value, 10);
   selectedYear = year;
   updateYearDisplay(year);
@@ -4422,22 +4912,32 @@ function handleYearSliderRelease() {
 function clearYearFilter() {
   selectedYear = null;
   updateYearDisplay(null);
-  if (yearSlider) yearSlider.value = 2026;
+  if (yearSlider) yearSlider.value = MAX_YEAR;
   applyYearFilter(null, null);
 }
 
 // Event listeners for year picker
 if (yearSlider) {
-  // Update display as user drags
+  // Update display as user drags (visual feedback only)
   yearSlider.addEventListener("input", () => {
-    updateYearDisplay(parseInt(yearSlider.value, 10));
+    const year = parseInt(yearSlider.value, 10);
+    updateYearDisplay(year);
   });
+
   // Fetch when user releases slider
-  yearSlider.addEventListener("change", handleYearSliderRelease);
+  yearSlider.addEventListener("change", handleYearSliderChange);
 }
 
 if (clearYearBtn) {
   clearYearBtn.addEventListener("click", clearYearFilter);
+}
+
+// Update max year label dynamically
+const maxLabel = document.getElementById("year-slider-max-label");
+if (maxLabel) maxLabel.textContent = MAX_YEAR;
+if (yearSlider) {
+  yearSlider.max = MAX_YEAR;
+  yearSlider.value = MAX_YEAR;
 }
 
 if (loadAllBtn) {

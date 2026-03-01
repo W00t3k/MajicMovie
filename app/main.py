@@ -2312,12 +2312,45 @@ Only respond with movie titles, nothing else."""
 
 
 @app.get("/api/poster")
-async def get_poster(title: str = Query(...), year: int | None = Query(default=None)) -> dict:
+async def get_poster(
+    title: str = Query(...),
+    year: int | None = Query(default=None),
+    force: str | None = Query(default=None),
+) -> dict:
     """Fetch poster and metadata for a movie on-demand."""
     if not swarm or not swarm._poster_lookup_client:
         return {"ok": False, "message": "Poster lookup not configured"}
     try:
-        info = await swarm._poster_lookup_client.lookup(title, year)
+        client = swarm._poster_lookup_client
+
+        # Force mode: clear cache and try multiple strategies
+        if force:
+            cache_key = f"{title.strip()} {year or ''}".lower().strip()
+            client._cache.pop(cache_key, None)
+
+            # Try variations of the title
+            variations = [title]
+            # Remove common suffixes
+            clean_title = title.replace(":", "").replace("-", " ").strip()
+            if clean_title != title:
+                variations.append(clean_title)
+            # Try first part before colon
+            if ":" in title:
+                variations.append(title.split(":")[0].strip())
+
+            for var in variations:
+                info = await client.lookup(var, year)
+                if info and info.get("poster_url"):
+                    return {"ok": True, **info}
+                # Try without year
+                if year:
+                    info = await client.lookup(var, None)
+                    if info and info.get("poster_url"):
+                        return {"ok": True, **info}
+
+            return {"ok": False, "message": "No poster found after retries"}
+
+        info = await client.lookup(title, year)
         if info:
             return {"ok": True, **info}
         return {"ok": False, "message": "No poster found"}
@@ -2717,6 +2750,181 @@ async def download_movie(payload: DownloadMovieRequest) -> dict:
         return {"ok": True, **result}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "status": "error", "message": str(exc)}
+
+
+class DownloadReleaseRequest(BaseModel):
+    title: str
+    year: int | None = None
+    release_link: str
+    indexer: str | None = None
+    raw_title: str | None = None
+
+
+@app.get("/api/releases/{title}")
+async def get_releases_for_movie(
+    title: str,
+    year: int | None = Query(default=None),
+) -> dict:
+    """Get available usenet releases for a movie with quality options."""
+    from app.services.usenet_parser import parse_release_with_metadata, release_to_dict
+
+    # Build search query
+    search_query = title.strip()
+    if year:
+        search_query = f"{search_query} {year}"
+
+    releases: list[dict] = []
+    errors: list[str] = []
+
+    # Search NZBGeek
+    if settings.nzbgeek_api_key:
+        try:
+            nzbgeek_client = UsenetClient(
+                base_url="https://api.nzbgeek.info",
+                api_key=settings.nzbgeek_api_key,
+                timeout_seconds=settings.source_timeout_seconds,
+            )
+            nzbgeek_results = await nzbgeek_client.movie_search(query=search_query, limit=50)
+            for item in nzbgeek_results:
+                raw_title = item.get("title", "")
+                if not raw_title:
+                    continue
+                parsed = parse_release_with_metadata(
+                    raw_title=raw_title,
+                    size_bytes=item.get("size_bytes"),
+                    size_human=item.get("size_human"),
+                    link=item.get("link"),
+                    indexer="nzbgeek",
+                )
+                # Filter TV releases
+                if parsed.is_tv_release:
+                    continue
+                # Filter by year if provided
+                if year and parsed.year and parsed.year != year:
+                    continue
+                releases.append(release_to_dict(parsed))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"NZBGeek: {exc}")
+
+    # Search DrunkenSlug
+    if settings.drunkenslug_api_key:
+        try:
+            drunkenslug_client = UsenetClient(
+                base_url=settings.drunkenslug_base_url or "https://drunkenslug.com/api",
+                api_key=settings.drunkenslug_api_key,
+                timeout_seconds=settings.source_timeout_seconds,
+            )
+            ds_results = await drunkenslug_client.movie_search(query=search_query, limit=50)
+            for item in ds_results:
+                raw_title = item.get("title", "")
+                if not raw_title:
+                    continue
+                parsed = parse_release_with_metadata(
+                    raw_title=raw_title,
+                    size_bytes=item.get("size_bytes"),
+                    size_human=item.get("size_human"),
+                    link=item.get("link"),
+                    indexer="drunkenslug",
+                )
+                # Filter TV releases
+                if parsed.is_tv_release:
+                    continue
+                # Filter by year if provided
+                if year and parsed.year and parsed.year != year:
+                    continue
+                releases.append(release_to_dict(parsed))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"DrunkenSlug: {exc}")
+
+    # Sort by score (highest first)
+    releases.sort(key=lambda r: r.get("score", 0), reverse=True)
+
+    # Deduplicate by raw_title
+    seen_titles = set()
+    unique_releases = []
+    for release in releases:
+        raw = release.get("raw_title", "")
+        if raw not in seen_titles:
+            seen_titles.add(raw)
+            unique_releases.append(release)
+
+    return {
+        "ok": True,
+        "title": title,
+        "year": year,
+        "releases": unique_releases[:30],  # Limit to top 30
+        "total_found": len(unique_releases),
+        "errors": errors if errors else None,
+    }
+
+
+@app.post("/api/download-release")
+async def download_specific_release(payload: DownloadReleaseRequest) -> dict:
+    """Download a specific release - sends NZB directly to SABnzbd."""
+    import httpx
+
+    # Send directly to SABnzbd if configured
+    if settings.sabnzbd_url and settings.sabnzbd_api_key:
+        try:
+            sab_url = settings.sabnzbd_url.rstrip("/")
+            params = {
+                "mode": "addurl",
+                "name": payload.release_link,
+                "nzbname": payload.raw_title or payload.title,
+                "apikey": settings.sabnzbd_api_key,
+                "cat": "movies",
+                "output": "json",
+            }
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(f"{sab_url}/api", params=params)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status"):
+                    # Also add to Radarr for tracking (but don't search)
+                    if settings.radarr_api_key:
+                        try:
+                            radarr_client = RadarrClient(
+                                base_url=settings.radarr_base_url,
+                                api_key=settings.radarr_api_key,
+                                timeout_seconds=5.0,
+                            )
+                            await radarr_client.ensure_movie_monitored(title=payload.title, year=payload.year)
+                        except Exception:
+                            pass  # Don't fail if Radarr tracking fails
+
+                    short_title = (payload.raw_title or payload.title)[:50]
+                    return {
+                        "ok": True,
+                        "status": "downloading",
+                        "message": f"⬇ Downloading: {short_title}...",
+                    }
+                else:
+                    return {"ok": False, "status": "error", "message": f"SABnzbd error: {data.get('error', 'unknown')}"}
+        except Exception as sab_exc:
+            logger.warning(f"SABnzbd send failed: {sab_exc}")
+            return {"ok": False, "status": "error", "message": f"SABnzbd error: {sab_exc}"}
+
+    # No SABnzbd - fall back to Radarr queue
+    if settings.radarr_api_key:
+        try:
+            radarr_client = RadarrClient(
+                base_url=settings.radarr_base_url,
+                api_key=settings.radarr_api_key,
+                timeout_seconds=settings.source_timeout_seconds,
+            )
+            result = await radarr_client.ensure_movie_wanted(title=payload.title, year=payload.year)
+            return {
+                "ok": True,
+                "status": "queued",
+                "message": "Added to Radarr queue (configure SABNZBD_URL for direct download)",
+                **result,
+            }
+        except Exception as exc:
+            return {"ok": False, "status": "error", "message": str(exc)}
+
+    return {"ok": False, "status": "skipped", "message": "No download service configured. Add SABNZBD_URL and SABNZBD_API_KEY to .env"}
 
 
 @app.get("/api/feedback/{user_id}", response_model=list[FeedbackRow])
