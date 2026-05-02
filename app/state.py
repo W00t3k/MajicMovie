@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from app.clients.poster_lookup_client import PosterLookupClient
     from app.services.plex_channel_schedule import PlexChannelScheduleService
     from app.services.plex_station import PlexStationService
+    from app.services.rag_service import LocalRAGService
 
 # Populated on startup by main.py
 memory_store: "MemoryStore"
@@ -22,6 +23,7 @@ enrichment_service: "EnrichmentService"
 poster_lookup_client: "PosterLookupClient | None" = None
 plex_channel_schedule: "PlexChannelScheduleService"
 plex_station_service: "PlexStationService"
+rag_service: "LocalRAGService | None" = None
 
 # Registered by main.py so routers can trigger a runtime reload
 # without creating a circular import.

@@ -235,6 +235,24 @@ class MemoryStore:
                 "CREATE INDEX IF NOT EXISTS idx_server_configs_type ON server_configs(service_type)"
             )
 
+            # RAG document index (local vector store for all data/*.json files)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rag_documents (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source      TEXT NOT NULL,
+                    title       TEXT NOT NULL,
+                    year        INTEGER,
+                    genres      TEXT,
+                    chunk_text  TEXT NOT NULL,
+                    embedding   TEXT NOT NULL,
+                    indexed_at  TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_source ON rag_documents(source)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_title  ON rag_documents(title)")
+
             # Run migrations for existing databases
             self._run_migrations(conn)
 

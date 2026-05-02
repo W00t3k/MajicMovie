@@ -1,254 +1,288 @@
 """
-RAG Service - Fast movie knowledge retrieval using Qdrant Cloud.
+RAG Service – fully local movie knowledge retrieval.
 
-Indexes movie data (reviews, awards, metadata) for quick retrieval,
-reducing LLM token usage and improving response speed.
+Stores embeddings in the existing SQLite database (rag_documents table).
+No cloud dependencies – uses sentence-transformers all-MiniLM-L6-v2 locally.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
+import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
-from qdrant_client import QdrantClient, models
-from sentence_transformers import SentenceTransformer
+import numpy as np
+
+from app.services.embedding import EmbeddingService
 
 logger = logging.getLogger(__name__)
 
-# Collection name for movie knowledge
-COLLECTION_NAME = "movie_knowledge"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Fast, 384 dimensions
+_SOURCE_LABELS: dict[str, str] = {
+    "oscars_best_picture": "Oscar Best Picture",
+    "criterion_collection": "Criterion Collection",
+    "imdb_top250": "IMDb Top 250",
+    "rottentomatoes_seed": "Rotten Tomatoes",
+    "rogerebert_seed": "Roger Ebert",
+    "a24_films": "A24",
+    "afi100": "AFI Top 100",
+    "cannes_palme_dor": "Cannes Palme d'Or",
+    "ghibli_films": "Studio Ghibli",
+    "sundance_films": "Sundance",
+    "bafta_winners": "BAFTA",
+    "golden_globes": "Golden Globes",
+    "blumhouse_films": "Blumhouse",
+    "marvel_dc": "Marvel/DC",
+    "letterboxd_top": "Letterboxd Top",
+    "mubi_curated": "MUBI",
+    "film_registry": "National Film Registry",
+    "metacritic_90": "Metacritic 90+",
+    "boxoffice_hits": "Box Office Hits",
+    "hidden_gems": "Hidden Gems",
+    "directors_spotlight": "Directors Spotlight",
+    "decades_essentials": "Decades Essentials",
+    "sight_sound_top100": "Sight & Sound Top 100",
+    "pixar_films": "Pixar",
+    "disney_classics": "Disney Classics",
+    "horror_classics": "Horror Classics",
+    "scifi_essentials": "Sci-Fi Essentials",
+    "anime_essentials": "Anime Essentials",
+    "korean_cinema": "Korean Cinema",
+    "film_noir": "Film Noir",
+    "neon_films": "Neon Films",
+}
 
 
-class RAGService:
-    """RAG service for movie knowledge retrieval."""
+def _movie_to_text(movie: dict | str, source: str) -> tuple[str, dict]:
+    """Convert a movie entry to a rich text chunk + metadata dict."""
+    label = _SOURCE_LABELS.get(source, source.replace("_", " ").title())
+    if isinstance(movie, str):
+        return f"{movie} [{label}]", {"title": movie, "year": None, "source": source, "genres": ""}
 
-    def __init__(
-        self,
-        qdrant_url: str | None = None,
-        qdrant_api_key: str | None = None,
-        data_dir: Path | None = None,
-    ):
-        self._qdrant_url = qdrant_url or os.getenv("QDRANT_URL")
-        self._qdrant_api_key = qdrant_api_key or os.getenv("QDRANT_API_KEY")
-        self._data_dir = data_dir or Path("data")
-        self._client: QdrantClient | None = None
-        self._embedder: SentenceTransformer | None = None
-        self._initialized = False
+    title = str(movie.get("title") or movie.get("name") or "").strip()
+    if not title:
+        return "", {}
+
+    year = movie.get("year")
+    genres: list[str] = movie.get("genres") or []
+    overview = str(movie.get("overview") or movie.get("description") or "").strip()
+    score = movie.get("tomatometer") or movie.get("score") or movie.get("rt_score") or ""
+    director = str(movie.get("director") or "").strip()
+    awards = str(movie.get("awards") or movie.get("award") or "").strip()
+    note = str(movie.get("note") or "").strip()
+
+    parts = [f"{title}"]
+    if year:
+        parts.append(f"({year})")
+    parts.append(f"[{label}]")
+    if director:
+        parts.append(f"Director: {director}.")
+    if genres:
+        parts.append(f"Genres: {', '.join(genres)}.")
+    if awards:
+        parts.append(f"Awards: {awards}.")
+    if score:
+        parts.append(f"Score: {score}.")
+    if note:
+        parts.append(note[:200])
+    if overview:
+        parts.append(overview[:400])
+
+    text = " ".join(parts)
+    meta = {
+        "title": title,
+        "year": int(year) if year and str(year).isdigit() else None,
+        "source": source,
+        "genres": ",".join(genres) if genres else "",
+    }
+    return text, meta
+
+
+class LocalRAGService:
+    """Fully local RAG: SQLite vectors + sentence-transformers embeddings."""
+
+    def __init__(self, db_path: Path, data_dir: Path | None = None):
+        self._db_path = db_path
+        self._data_dir = data_dir or db_path.parent.parent / "data"
+        self._embedder = EmbeddingService()
+        self._local = threading.local()
+
+    def _connect(self) -> sqlite3.Connection:
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            conn = sqlite3.connect(self._db_path, check_same_thread=False, timeout=30.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._local.conn = conn
+        return self._local.conn
+
+    def _init_table(self) -> None:
+        conn = self._connect()
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rag_documents (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                source      TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                year        INTEGER,
+                genres      TEXT,
+                chunk_text  TEXT NOT NULL,
+                embedding   TEXT NOT NULL,
+                indexed_at  TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_source ON rag_documents(source)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rag_title  ON rag_documents(title)")
+        conn.commit()
 
     @property
-    def available(self) -> bool:
-        return bool(self._qdrant_url and self._qdrant_api_key)
-
-    async def initialize(self) -> bool:
-        """Initialize Qdrant client and embedder."""
-        if self._initialized:
-            return True
-
-        if not self.available:
-            logger.warning("Qdrant credentials not configured")
-            return False
-
+    def doc_count(self) -> int:
         try:
-            # Initialize Qdrant client
-            self._client = QdrantClient(
-                url=self._qdrant_url,
-                api_key=self._qdrant_api_key,
-            )
+            row = self._connect().execute("SELECT COUNT(*) FROM rag_documents").fetchone()
+            return row[0] if row else 0
+        except Exception:
+            return 0
 
-            # Initialize embedder (runs locally, fast)
-            self._embedder = SentenceTransformer(EMBEDDING_MODEL)
+    def ingest_all(self, force: bool = False) -> dict[str, int]:
+        """Read every data/*.json file and upsert embeddings into SQLite."""
+        self._init_table()
+        conn = self._connect()
 
-            # Ensure collection exists
-            await self._ensure_collection()
+        if not force and self.doc_count > 0:
+            logger.info("RAG index already populated (%d docs) – skipping ingest", self.doc_count)
+            return {"skipped": self.doc_count}
 
-            self._initialized = True
-            logger.info("RAG service initialized")
-            return True
+        if force:
+            conn.execute("DELETE FROM rag_documents")
+            conn.commit()
+            logger.info("Cleared existing RAG index for re-ingest")
 
-        except Exception as e:
-            logger.error(f"Failed to initialize RAG: {e}")
-            return False
+        json_files = sorted(self._data_dir.glob("*.json"))
+        stats: dict[str, int] = {"files": 0, "indexed": 0, "errors": 0}
 
-    async def _ensure_collection(self) -> None:
-        """Create collection if it doesn't exist."""
-        collections = self._client.get_collections().collections
-        exists = any(c.name == COLLECTION_NAME for c in collections)
+        all_texts: list[str] = []
+        all_meta: list[dict] = []
 
-        if not exists:
-            self._client.create_collection(
-                collection_name=COLLECTION_NAME,
-                vectors_config=models.VectorParams(
-                    size=384,  # MiniLM-L6-v2 dimension
-                    distance=models.Distance.COSINE,
-                ),
-            )
-            logger.info(f"Created collection: {COLLECTION_NAME}")
-
-    def _embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for texts."""
-        if not self._embedder:
-            raise RuntimeError("Embedder not initialized")
-        embeddings = self._embedder.encode(texts, convert_to_numpy=True)
-        return embeddings.tolist()
-
-    async def index_movie_data(self) -> dict[str, int]:
-        """Index all movie data from JSON files."""
-        if not self._initialized:
-            await self.initialize()
-
-        if not self._client:
-            return {"error": "Client not initialized"}
-
-        stats = {"indexed": 0, "files": 0, "errors": 0}
-        points = []
-        point_id = 0
-
-        # Index all JSON data files
-        json_files = list(self._data_dir.glob("*.json"))
         for json_file in json_files:
+            # Skip seed/cache files that aren't static datasets
+            if any(s in json_file.name for s in ("cache", "schedule")):
+                continue
             try:
-                with open(json_file) as f:
+                with open(json_file, encoding="utf-8") as f:
                     data = json.load(f)
-
                 source = json_file.stem
                 movies = data if isinstance(data, list) else data.get("movies", [])
-
                 for movie in movies:
-                    if isinstance(movie, str):
-                        # Simple title list
-                        text = f"{movie} - {source}"
-                        metadata = {"title": movie, "source": source}
-                    else:
-                        # Full movie object
-                        title = movie.get("title", movie.get("name", ""))
-                        year = movie.get("year", "")
-                        genres = movie.get("genres", [])
-                        overview = movie.get("overview", movie.get("description", ""))
-                        score = movie.get("tomatometer", movie.get("score", ""))
-
-                        # Build rich text for embedding
-                        text_parts = [title]
-                        if year:
-                            text_parts.append(f"({year})")
-                        if genres:
-                            text_parts.append(f"Genres: {', '.join(genres)}")
-                        if overview:
-                            text_parts.append(overview[:500])
-                        if score:
-                            text_parts.append(f"Score: {score}")
-                        text_parts.append(f"Source: {source}")
-
-                        text = " ".join(text_parts)
-                        metadata = {
-                            "title": title,
-                            "year": year,
-                            "source": source,
-                            "score": score,
-                            "genres": ",".join(genres) if genres else "",
-                        }
-
-                    if text and len(text) > 10:
-                        embedding = self._embed([text])[0]
-                        points.append(models.PointStruct(
-                            id=point_id,
-                            vector=embedding,
-                            payload={"text": text[:1000], **metadata},
-                        ))
-                        point_id += 1
-                        stats["indexed"] += 1
-
+                    text, meta = _movie_to_text(movie, source)
+                    if text and len(text) > 8:
+                        all_texts.append(text)
+                        all_meta.append(meta)
                 stats["files"] += 1
-
-            except Exception as e:
-                logger.error(f"Error indexing {json_file}: {e}")
+            except Exception as exc:
+                logger.error("Error reading %s: %s", json_file.name, exc)
                 stats["errors"] += 1
 
-        # Upsert all points
-        if points:
-            self._client.upsert(
-                collection_name=COLLECTION_NAME,
-                points=points,
-            )
-            logger.info(f"Indexed {len(points)} movie knowledge points")
+        if not all_texts:
+            return stats
 
+        logger.info("Embedding %d movie chunks …", len(all_texts))
+        embeddings = self._embedder.embed_batch(all_texts)
+
+        rows = [
+            (
+                meta["source"],
+                meta["title"],
+                meta.get("year"),
+                meta.get("genres", ""),
+                text[:1200],
+                json.dumps(emb),
+            )
+            for text, meta, emb in zip(all_texts, all_meta, embeddings)
+        ]
+
+        conn.executemany(
+            "INSERT INTO rag_documents (source, title, year, genres, chunk_text, embedding) VALUES (?,?,?,?,?,?)",
+            rows,
+        )
+        conn.commit()
+        stats["indexed"] = len(rows)
+        logger.info("RAG index built: %d documents from %d files", len(rows), stats["files"])
         return stats
 
-    async def search(
+    def search(
         self,
         query: str,
-        limit: int = 5,
+        limit: int = 6,
         source_filter: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Search for relevant movie knowledge."""
-        if not self._initialized:
-            await self.initialize()
-
-        if not self._client:
+        """Cosine-similarity search over rag_documents."""
+        if self.doc_count == 0:
             return []
 
-        try:
-            # Generate query embedding
-            query_embedding = self._embed([query])[0]
+        q_vec = np.array(self._embedder.embed_sync(query), dtype=np.float32)
 
-            # Build filter if specified
-            query_filter = None
-            if source_filter:
-                query_filter = models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="source",
-                            match=models.MatchValue(value=source_filter),
-                        )
-                    ]
-                )
+        conn = self._connect()
+        sql = "SELECT id, source, title, year, genres, chunk_text, embedding FROM rag_documents"
+        params: list = []
+        if source_filter:
+            sql += " WHERE source = ?"
+            params.append(source_filter)
 
-            # Search
-            results = self._client.search(
-                collection_name=COLLECTION_NAME,
-                query_vector=query_embedding,
-                limit=limit,
-                query_filter=query_filter,
-            )
-
-            return [
-                {
-                    "text": hit.payload.get("text", ""),
-                    "title": hit.payload.get("title", ""),
-                    "source": hit.payload.get("source", ""),
-                    "score": hit.score,
-                }
-                for hit in results
-            ]
-
-        except Exception as e:
-            logger.error(f"RAG search error: {e}")
+        rows = conn.execute(sql, params).fetchall()
+        if not rows:
             return []
 
-    async def get_movie_context(self, title: str, limit: int = 3) -> str:
-        """Get rich context for a specific movie."""
-        results = await self.search(title, limit=limit)
+        scored: list[tuple[float, dict]] = []
+        for row in rows:
+            try:
+                vec = np.array(json.loads(row["embedding"]), dtype=np.float32)
+                norm_q = np.linalg.norm(q_vec)
+                norm_v = np.linalg.norm(vec)
+                if norm_q == 0 or norm_v == 0:
+                    continue
+                sim = float(np.dot(q_vec, vec) / (norm_q * norm_v))
+                scored.append((sim, {
+                    "title": row["title"],
+                    "year": row["year"],
+                    "source": _SOURCE_LABELS.get(row["source"], row["source"]),
+                    "genres": row["genres"],
+                    "text": row["chunk_text"],
+                    "score": round(sim, 4),
+                }))
+            except Exception:
+                continue
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [item for _, item in scored[:limit]]
+
+    async def search_async(self, query: str, limit: int = 6, source_filter: str | None = None) -> list[dict[str, Any]]:
+        return self.search(query, limit=limit, source_filter=source_filter)
+
+    def get_movie_context(self, title: str, limit: int = 4) -> str:
+        """Return a formatted context block for a given movie title."""
+        results = self.search(title, limit=limit)
         if not results:
             return ""
+        parts = [f"[{r['source']}] {r['text'][:350]}" for r in results]
+        return "\n\n".join(parts)
 
-        context_parts = []
-        for r in results:
-            context_parts.append(f"[{r['source']}] {r['text'][:300]}")
+    async def get_movie_context_async(self, title: str, limit: int = 4) -> str:
+        return self.get_movie_context(title, limit=limit)
 
-        return "\n\n".join(context_parts)
-
-    async def enhance_prompt(self, query: str, limit: int = 3) -> str:
-        """Enhance a prompt with relevant RAG context."""
-        results = await self.search(query, limit=limit)
+    def enhance_prompt(self, query: str, limit: int = 4) -> str:
+        """Return a RAG context prefix for injecting into an LLM prompt."""
+        results = self.search(query, limit=limit)
         if not results:
             return ""
+        lines = [f"- {r['title']} ({r['year'] or '?'}): {r['text'][:200]}" for r in results]
+        return "Relevant movie knowledge:\n" + "\n".join(lines) + "\n\n"
 
-        context = "\n".join([
-            f"- {r['title']}: {r['text'][:200]}"
-            for r in results
-        ])
+    async def enhance_prompt_async(self, query: str, limit: int = 4) -> str:
+        return self.enhance_prompt(query, limit=limit)
 
-        return f"Relevant context:\n{context}\n\n"
+
+# Backwards-compatible alias so existing imports of RAGService still work
+RAGService = LocalRAGService

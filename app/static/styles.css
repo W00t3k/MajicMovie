@@ -1036,6 +1036,7 @@ body {
   padding: 24px;
   max-width: 1600px;
   margin: 0 auto;
+  min-height: calc(100vh - 60px);
 }
 
 .sidebar {
@@ -1167,6 +1168,8 @@ body.sidebar-resizing {
   display: flex;
   flex-direction: column;
   gap: 24px;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 /* ===== Card ===== */

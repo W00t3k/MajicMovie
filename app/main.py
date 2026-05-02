@@ -31,6 +31,7 @@ from app.services.swarm import SwarmOrchestrator
 from app.clients.llm_client import UnifiedLLMClient
 from app.clients.poster_lookup_client import PosterLookupClient
 from app.clients.tmdb_client import TMDBClient
+from app.services.rag_service import LocalRAGService
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,10 @@ memory_store, swarm, poster_lookup_client = _build_runtime()
 enrichment_service = EnrichmentService(memory_store, poster_lookup_client)
 plex_station_service = PlexStationService()
 plex_channel_schedule = PlexChannelScheduleService(project_root / settings.data_dir / "plex_channel_schedule.json")
+rag_service = LocalRAGService(
+    db_path=project_root / settings.memory_db_path,
+    data_dir=project_root / settings.data_dir,
+)
 
 # Populate shared state module
 app_state.memory_store = memory_store
@@ -166,6 +171,7 @@ app_state.poster_lookup_client = poster_lookup_client
 app_state.enrichment_service = enrichment_service
 app_state.plex_station_service = plex_station_service
 app_state.plex_channel_schedule = plex_channel_schedule
+app_state.rag_service = rag_service
 
 
 async def _reload_runtime() -> None:
@@ -200,6 +206,15 @@ async def _lifespan(application: FastAPI):  # noqa: ARG001
         _plex_scheduler_task = asyncio.create_task(_run_plex_channel_scheduler_loop())
     enrichment_service.start()
     logger.info("Background enrichment service started")
+    # Run RAG ingest in a thread so it doesn't block startup
+    def _run_rag_ingest():
+        try:
+            stats = rag_service.ingest_all(force=False)
+            logger.info("RAG ingest complete: %s", stats)
+        except Exception as exc:
+            logger.warning("RAG ingest failed: %s", exc)
+    import threading as _threading
+    _threading.Thread(target=_run_rag_ingest, daemon=True, name="rag-ingest").start()
     yield
     logger.info("Initiating graceful shutdown...")
     enrichment_service.stop()

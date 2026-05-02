@@ -8,6 +8,9 @@ pydantic-settings>=2.10.1
 python-dotenv>=1.1.1
 numpy>=2.3.2
 
+# Embeddings (local RAG)
+sentence-transformers>=3.0.0
+
 # LLM Clients
 groq>=0.12.0
 

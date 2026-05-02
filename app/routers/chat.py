@@ -98,6 +98,14 @@ async def ai_chat(payload: AIChatRequest) -> AIChatResponse:
             sources_queried = [k for k, v in usenet_results.items() if v]
             usenet_context = format_usenet_results(usenet_results)
 
+    # Augment with local RAG context for movie knowledge queries
+    rag_context = ""
+    if not is_usenet_query and state.rag_service is not None:
+        try:
+            rag_context = state.rag_service.enhance_prompt(message, limit=4)
+        except Exception:
+            rag_context = ""
+
     if is_usenet_query:
         system_prompt = (
             "You are a helpful movie assistant for the Majic Movie Selector app. "
@@ -115,6 +123,8 @@ async def ai_chat(payload: AIChatRequest) -> AIChatResponse:
         )
 
     user_prompt = message
+    if rag_context:
+        user_prompt = f"{rag_context}User question: {message}"
     if usenet_context:
         user_prompt = (
             f"User question: {message}\n\n"

@@ -13,6 +13,7 @@ dependencies = [
   "pydantic-settings>=2.10.1",
   "python-dotenv>=1.1.1",
   "numpy>=2.3.2",
+  "sentence-transformers>=3.0.0",
   "groq>=0.12.0",
   "rich>=13.0.0",
   "beautifulsoup4>=4.12.0",
