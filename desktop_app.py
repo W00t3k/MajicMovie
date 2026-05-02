@@ -45,7 +45,7 @@ def wait_for_server(port: int, timeout: int = 30):
 
 
 def main():
-    port = 8443
+    port = 8081
     # Get local IP for remote access
     import socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
