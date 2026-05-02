@@ -58,7 +58,7 @@ class MajicSupervisor:
 
     def __init__(
         self,
-        host: str = "127.0.0.1",
+        host: str = "0.0.0.0",
         port: int = 8443,
         log_file: Path | None = None,
     ):
@@ -360,6 +360,6 @@ class MajicSupervisor:
         self.state.is_stopping = True
 
 
-def create_supervisor(host: str = "127.0.0.1", port: int = 8443) -> MajicSupervisor:
+def create_supervisor(host: str = "0.0.0.0", port: int = 8443) -> MajicSupervisor:
     """Factory function to create a supervisor instance."""
     return MajicSupervisor(host=host, port=port)

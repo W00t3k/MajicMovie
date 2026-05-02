@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PORT="${1:-8443}"
-HOST="${HOST:-127.0.0.1}"
+HOST="${HOST:-0.0.0.0}"
 UVICORN_BIN="$ROOT_DIR/.venv/bin/uvicorn"
 LOG_FILE="$ROOT_DIR/server-${PORT}.log"
 PID_FILE="$ROOT_DIR/.server-${PORT}.pid"

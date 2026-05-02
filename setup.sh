@@ -50,7 +50,7 @@ echo "-----------------"
 
 get_input "App port" "8080" "app_port"
 get_input "App title" "Majic Movie Selector" "app_title"
-get_input "Bind to all interfaces (0.0.0.0) or localhost (127.0.0.1)" "0.0.0.0" "app_host"
+get_input "Bind to all interfaces (0.0.0.0)" "0.0.0.0" "app_host"
 
 # Optional API keys (can be left empty)
 echo ""

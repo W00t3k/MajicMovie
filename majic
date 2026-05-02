@@ -265,20 +265,22 @@ def get_memory_gb() -> int:
 def get_available_memory_gb() -> int:
     """Get available system memory in GB."""
     if sys.platform == "darwin":
-        # macOS
+        # macOS - use pressure memory for more accurate available memory
         import subprocess
-        result = subprocess.run(["vm_stat"], capture_output=True, text=True)
-        page_size = 4096  # Default page size
-        for line in result.stdout.split("\n"):
-            if "page size of" in line:
-                page_size = int(line.split()[-1])
-            elif "Pages free:" in line:
-                free_pages = int(line.split()[2].rstrip("."))
-            elif "Pages inactive:" in line:
-                inactive_pages = int(line.split()[2].rstrip("."))
+        try:
+            result = subprocess.run(["memory_pressure", "-c"], capture_output=True, text=True)
+            if "System-wide memory free percentage:" in result.stdout:
+                # Extract free percentage and calculate from total memory
+                for line in result.stdout.split("\n"):
+                    if "System-wide memory free percentage:" in line:
+                        free_percent = int(line.split(":")[-1].strip().rstrip("%"))
+                        total_memory = get_memory_gb()
+                        return (total_memory * free_percent) // 100
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
         
-        available_bytes = (free_pages + inactive_pages) * page_size
-        return available_bytes // 1024 // 1024 // 1024
+        # Fallback: use total memory as available (conservative estimate)
+        return get_memory_gb()
     else:
         # Linux
         try:
@@ -290,7 +292,7 @@ def get_available_memory_gb() -> int:
                 return available_kb // 1024 // 1024
         except FileNotFoundError:
             pass
-    return 4  # Fallback to 4GB
+    return 8  # Fallback to 8GB
 
 
 def get_optimal_model(available_memory_gb: int) -> tuple[str, str]:
