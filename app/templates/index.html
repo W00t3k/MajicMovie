@@ -12,6 +12,12 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/static/styles.css?v=20260322a" />
+    <link rel="manifest" href="/static/manifest.json" />
+    <meta name="theme-color" content="#7c3aed" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Majic" />
+    <link rel="apple-touch-icon" href="/static/logo.svg" />
   </head>
   <body>
     <div class="app">
@@ -22,6 +28,7 @@
             <span class="brand-text">Majic</span>
           </a>
           <span id="nav-ai-provider" class="nav-ai-provider-pill" title="Active AI provider"></span>
+          <button id="theme-mode-btn" type="button" title="Toggle dark/light mode" style="background:none;border:1px solid var(--border,#333);border-radius:8px;padding:4px 8px;cursor:pointer;color:var(--text,#fff);font-size:16px;margin-left:8px">☀️</button>
         </div>
         <div class="nav-menu" id="nav-menu">
           <button class="nav-menu-btn" id="nav-menu-btn" type="button">
@@ -398,6 +405,7 @@
             </div>
 
             <div id="recommendations" class="movie-grid"></div>
+            <div id="scroll-sentinel" style="height:1px;width:100%"></div>
           </section>
         </main>
       </div>
@@ -853,6 +861,148 @@
           explainBtn.textContent = '✨ Explain';
         }
       });
+    })();
+    </script>
+
+    <script>
+    /* ── PWA Service Worker Registration ── */
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+      });
+    }
+
+    /* ── Dark / Light Mode Toggle ── */
+    (function() {
+      const THEME_KEY = 'majic_theme';
+      const root = document.documentElement;
+
+      function applyTheme(theme) {
+        root.setAttribute('data-theme', theme);
+        localStorage.setItem(THEME_KEY, theme);
+        const btn = document.getElementById('theme-mode-btn');
+        if (btn) btn.title = theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode';
+        if (btn) btn.textContent = theme === 'dark' ? '☀️' : '🌙';
+      }
+
+      const saved = localStorage.getItem(THEME_KEY) ||
+        (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      applyTheme(saved);
+
+      window.addEventListener('DOMContentLoaded', () => {
+        const btn = document.getElementById('theme-mode-btn');
+        if (btn) {
+          btn.addEventListener('click', () => {
+            const current = root.getAttribute('data-theme') || 'dark';
+            applyTheme(current === 'dark' ? 'light' : 'dark');
+          });
+        }
+      });
+    })();
+
+    /* ── Keyboard Shortcuts ── */
+    (function() {
+      const SHORTCUTS = {
+        'r': () => document.getElementById('recommend-btn')?.click(),
+        'R': () => document.getElementById('recommend-btn')?.click(),
+        '/': () => { document.getElementById('movie-search')?.focus(); },
+        'Escape': () => {
+          document.getElementById('movie-modal')?.classList.remove('open');
+          document.getElementById('movie-search')?.blur();
+        },
+        'ArrowRight': () => scrollCards(1),
+        'ArrowLeft': () => scrollCards(-1),
+        '?': () => showShortcutsHelp(),
+      };
+
+      function scrollCards(dir) {
+        const container = document.getElementById('recommendations');
+        if (container) container.scrollBy({ left: dir * 320, behavior: 'smooth' });
+      }
+
+      function showShortcutsHelp() {
+        const existing = document.getElementById('shortcuts-toast');
+        if (existing) { existing.remove(); return; }
+        const toast = document.createElement('div');
+        toast.id = 'shortcuts-toast';
+        toast.style.cssText = 'position:fixed;bottom:2rem;right:2rem;background:var(--card-bg,#1a1a2e);color:var(--text,#fff);border:1px solid var(--border,#333);border-radius:12px;padding:1.2rem 1.5rem;z-index:9999;font-size:.85rem;line-height:1.8;box-shadow:0 8px 32px rgba(0,0,0,.4)';
+        toast.innerHTML = '<strong>⌨️ Keyboard Shortcuts</strong><br>' +
+          '<code>R</code> — Get Recommendations<br>' +
+          '<code>/</code> — Search Movies<br>' +
+          '<code>← →</code> — Scroll Cards<br>' +
+          '<code>Esc</code> — Close Modal<br>' +
+          '<code>?</code> — Toggle This Help';
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 5000);
+      }
+
+      document.addEventListener('keydown', (e) => {
+        const tag = document.activeElement?.tagName?.toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+          if (e.key === 'Escape') SHORTCUTS['Escape']();
+          return;
+        }
+        const handler = SHORTCUTS[e.key];
+        if (handler) { e.preventDefault(); handler(); }
+      });
+    })();
+
+    /* ── Infinite Scroll ── */
+    (function() {
+      let _scrollPage = 1;
+      let _scrollLoading = false;
+      let _scrollExhausted = false;
+
+      const sentinel = document.getElementById('scroll-sentinel');
+      if (!sentinel) return;
+
+      const observer = new IntersectionObserver(async (entries) => {
+        if (!entries[0].isIntersecting || _scrollLoading || _scrollExhausted) return;
+        _scrollLoading = true;
+        _scrollPage++;
+
+        const yearFrom = document.getElementById('year-from')?.value || '';
+        const yearTo = document.getElementById('year-to')?.value || '';
+        const params = new URLSearchParams({ page: _scrollPage, page_size: 24 });
+        if (yearFrom) params.set('year_from', yearFrom);
+        if (yearTo) params.set('year_to', yearTo);
+
+        try {
+          const res = await fetch('/api/recommendations/browse?' + params.toString());
+          const data = await res.json();
+          const items = data.movies || data.recommendations || [];
+
+          if (!items.length) { _scrollExhausted = true; observer.disconnect(); return; }
+
+          const container = document.getElementById('recommendations');
+          if (!container) return;
+
+          items.forEach(item => {
+            const movie = item.movie || item;
+            const card = document.createElement('div');
+            card.className = 'rec-card';
+            card.innerHTML = `
+              <div class="card-poster">
+                ${movie.poster_url
+                  ? `<img src="${movie.poster_url}" alt="${movie.title}" loading="lazy" />`
+                  : `<div class="poster-placeholder">🎬</div>`}
+              </div>
+              <div class="card-body">
+                <div class="card-title">${movie.title}</div>
+                <div class="card-meta">${movie.year || ''}</div>
+              </div>`;
+            container.appendChild(card);
+          });
+        } catch(e) {
+          _scrollLoading = false;
+        } finally {
+          _scrollLoading = false;
+        }
+      }, { rootMargin: '400px' });
+
+      observer.observe(sentinel);
+
+      window._resetScroll = () => { _scrollPage = 1; _scrollLoading = false; _scrollExhausted = false; };
     })();
     </script>
   </body>

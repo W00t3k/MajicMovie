@@ -80,6 +80,7 @@ def _build_runtime() -> tuple[MemoryStore, SwarmOrchestrator, PosterLookupClient
     from app.agents.korean_cinema_agent import KoreanCinemaAgent
     from app.agents.film_noir_agent import FilmNoirAgent
     from app.agents.neon_agent import NeonAgent
+    from app.agents.trakt_agent import TraktAgent
 
     embedding_service = EmbeddingService()
     memory_store = MemoryStore(
@@ -123,12 +124,14 @@ def _build_runtime() -> tuple[MemoryStore, SwarmOrchestrator, PosterLookupClient
         KoreanCinemaAgent(dataset_path=project_root / "data/korean_cinema.json", memory_store=memory_store),
         FilmNoirAgent(dataset_path=project_root / "data/film_noir.json", memory_store=memory_store),
         NeonAgent(dataset_path=project_root / "data/neon_films.json", memory_store=memory_store),
+        TraktAgent(client_id=settings.trakt_client_id, access_token=settings.trakt_access_token, timeout_seconds=settings.source_timeout_seconds),
     ]
 
     recommender = Recommender(memory_store=memory_store)
     poster_lookup_client = PosterLookupClient(
         timeout_seconds=settings.source_timeout_seconds,
         tmdb_api_key=settings.tmdb_api_key,
+        fanart_api_key=settings.fanart_api_key,
         memory_store=memory_store,
     )
     tmdb_client = TMDBClient(api_key=settings.tmdb_api_key, timeout_seconds=settings.source_timeout_seconds) if settings.tmdb_api_key else None
@@ -249,11 +252,11 @@ app.include_router(auth_router)
 # ── Routers ────────────────────────────────────────────────────────────────────
 
 from app.routers import pages, chat, settings_router, servers, seen  # noqa: E402
-from app.routers import usenet, downloads, plex, recommendations, admin, mcp  # noqa: E402
+from app.routers import usenet, downloads, plex, recommendations, admin, mcp, backup  # noqa: E402
 
 pages.set_templates(templates)
 
-for _router_module in (pages, chat, settings_router, servers, seen, usenet, downloads, plex, recommendations, admin, mcp):
+for _router_module in (pages, chat, settings_router, servers, seen, usenet, downloads, plex, recommendations, admin, mcp, backup):
     app.include_router(_router_module.router)
 
 

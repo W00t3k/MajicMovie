@@ -47,10 +47,10 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
 cp .env.example .env
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8080
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8443
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080).
+Open [http://0.0.0.0:8443](http://0.0.0.0:8443).
 
 ## 3. Integrations
 
@@ -68,9 +68,11 @@ All integrations are optional. If keys are missing, agents are marked `skipped` 
 Settings and integration tests are managed from the web app at `/integrations`.
 
 ### Plex notes
+
 Use a Plex token from your server account and set `PLEX_BASE_URL`, for example `http://192.168.1.20:32400`.
 
 #### Plex TV Station (playlist channel on TV clients)
+
 - `POST /api/plex/channel/refresh` builds or refreshes a Plex playlist channel (default `Majic TV Station`) with a random queue from your Plex movie library.
 - `POST /api/plex/channel/schedule` configures daily run times (`HH:MM`, 24-hour) so the playlist rotates automatically.
 - `GET /api/plex/channel/status` shows current schedule, last run status, playback status, and current playlist metadata.
@@ -95,9 +97,11 @@ Example schedule payload:
 ```
 
 ### Radarr notes
+
 Set `RADARR_BASE_URL`, then add your API key from `Settings -> General -> Security`.
 
 ### Usenet notes
+
 The current client expects Newznab JSON shape (`/api?t=search&cat=2000&o=json`).
 
 ## 4. Reasoning Engine

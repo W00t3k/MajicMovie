@@ -544,3 +544,72 @@ async def get_poster(
         return {"ok": False, "message": "No poster found"}
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
+
+
+@router.get("/api/recommendations/browse")
+async def browse_recommendations(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=24, ge=1, le=100),
+    year_from: int | None = Query(default=None),
+    year_to: int | None = Query(default=None),
+    genre: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+):
+    """Paginated browse endpoint powering infinite scroll. Filters by year range, genre, source."""
+    if not state.swarm:
+        return {"ok": False, "movies": [], "page": page, "has_more": False}
+
+    try:
+        source_movies = state.swarm.get_source_movies() if hasattr(state.swarm, "get_source_movies") else {}
+    except Exception:
+        source_movies = {}
+
+    all_movies: list[dict] = []
+    seen: set[str] = set()
+
+    for agent_name, movies in source_movies.items():
+        for movie in movies:
+            title = getattr(movie, "title", None) or movie.get("title", "")
+            year = getattr(movie, "year", None) or movie.get("year")
+            if not title:
+                continue
+            key = f"{title.lower()}::{year}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            if year_from and year and year < year_from:
+                continue
+            if year_to and year and year > year_to:
+                continue
+
+            genres = getattr(movie, "genres", None) or movie.get("genres", []) or []
+            if genre and genre.lower() not in [g.lower() for g in genres]:
+                continue
+
+            tags = getattr(movie, "source_tags", None) or movie.get("source_tags", []) or []
+            if source and source.lower() not in [t.lower() for t in tags] and source.lower() != agent_name.lower():
+                continue
+
+            all_movies.append({
+                "title": title,
+                "year": year,
+                "poster_url": getattr(movie, "poster_url", None) or movie.get("poster_url"),
+                "overview": getattr(movie, "overview", None) or movie.get("overview"),
+                "genres": genres,
+                "source_tags": tags,
+            })
+
+    total = len(all_movies)
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = all_movies[start:end]
+
+    return {
+        "ok": True,
+        "movies": page_items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "has_more": end < total,
+    }

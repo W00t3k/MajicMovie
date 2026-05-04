@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # Persist cache to DB every N lookups
 PERSIST_EVERY_N_LOOKUPS = 50
 
+# Sentinel value for confirmed-missing posters (cache failures to stop retrying)
+_MISSING_SENTINEL = "__missing__"
+
 
 class PosterLookupClient:
     ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
@@ -32,12 +35,14 @@ class PosterLookupClient:
         self,
         timeout_seconds: float,
         tmdb_api_key: str | None = None,
+        fanart_api_key: str | None = None,
         memory_store: "MemoryStore | None" = None,
     ):
         self._http = HTTPClient(timeout_seconds)
         self._cache: dict[str, Any] = {}
         self._memory_store = memory_store
         self._lookup_count = 0
+        self._fanart_api_key = fanart_api_key
         self._tmdb_client = (
             TMDBClient(api_key=tmdb_api_key, timeout_seconds=timeout_seconds)
             if tmdb_api_key
@@ -89,6 +94,8 @@ class PosterLookupClient:
         cache_key = query.lower()
         if cache_key in self._cache:
             cached = self._cache[cache_key]
+            if cached == _MISSING_SENTINEL:
+                return None  # Confirmed missing, stop retrying
             if isinstance(cached, dict):
                 return cached
             return {"poster_url": cached}
@@ -100,6 +107,12 @@ class PosterLookupClient:
             tmdb_result = await self._lookup_tmdb(title, year)
             if tmdb_result:
                 result = self._merge_result(result, tmdb_result)
+
+        # Try FanArt.tv (excellent movie poster database)
+        if not result or not result.get("poster_url"):
+            fanart_result = await self._lookup_fanart(title, year)
+            if fanart_result:
+                result = self._merge_result(result, fanart_result)
 
         # Try OMDB
         if not result or not result.get("poster_url"):
@@ -131,14 +144,14 @@ class PosterLookupClient:
             if wiki_result:
                 result = self._merge_result(result, wiki_result)
 
-        # Only cache successful lookups — failed ones should be retried
         if result:
             self._cache[cache_key] = result
             self._lookup_count += 1
-
-            # Phase 3: Persist cache to DB periodically
             if self._lookup_count % PERSIST_EVERY_N_LOOKUPS == 0:
                 self._persist_cache_to_db()
+        else:
+            # Cache missing sentinel so we stop retrying on every request
+            self._cache[cache_key] = _MISSING_SENTINEL
 
         return result or None
 
@@ -321,6 +334,51 @@ class PosterLookupClient:
     @staticmethod
     def _upgrade_artwork_url(url: str) -> str:
         return url.replace("100x100bb", "600x600bb").replace("60x60bb", "600x600bb")
+
+    async def _lookup_fanart(self, title: str, year: int | None = None) -> dict[str, Any] | None:
+        """Try FanArt.tv for high-quality movie posters."""
+        if not self._fanart_api_key and not self._tmdb_client:
+            return None
+        try:
+            # First get TMDB ID via search
+            if not self._tmdb_client:
+                return None
+            results = await self._tmdb_client.search_movie(query=title.strip(), year=year)
+            tmdb_id = None
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                item_title = str(item.get("title") or "").strip()
+                if self._title_like_match(title, item_title):
+                    tmdb_id = item.get("id")
+                    break
+            if not tmdb_id:
+                return None
+
+            # Query FanArt.tv with TMDB ID
+            api_key = self._fanart_api_key or "9ebd4b92ba42e92e4fbc404cbb0c3a72"  # public fallback key
+            url = f"https://webservice.fanart.tv/v3/movies/{tmdb_id}?api_key={api_key}"
+            data = await self._http.get_json(url)
+            if not data or not isinstance(data, dict):
+                return None
+
+            # Try movieposter first, then hdmovieclearart
+            for key in ("movieposter", "hdmovieclearart", "moviethumb"):
+                posters = data.get(key, [])
+                if posters and isinstance(posters, list):
+                    # Prefer English language posters
+                    for p in posters:
+                        if isinstance(p, dict) and p.get("lang") in ("en", ""):
+                            url_val = p.get("url")
+                            if url_val:
+                                return {"poster_url": url_val}
+                    # Fallback to first available
+                    first = posters[0]
+                    if isinstance(first, dict) and first.get("url"):
+                        return {"poster_url": first["url"]}
+            return None
+        except Exception:
+            return None
 
     async def _lookup_letterboxd(self, title: str, year: int | None = None) -> dict[str, Any] | None:
         """Try to find poster from Letterboxd by scraping their film page."""

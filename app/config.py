@@ -81,6 +81,25 @@ class Settings(BaseSettings):
     sabnzbd_url: str | None = Field(default=None, alias="SABNZBD_URL")
     sabnzbd_api_key: str | None = Field(default=None, alias="SABNZBD_API_KEY")
 
+    # FanArt.tv (poster images)
+    fanart_api_key: str | None = Field(default=None, alias="FANART_API_KEY")
+
+    # ntfy.sh push notifications
+    ntfy_topic: str | None = Field(default=None, alias="NTFY_TOPIC")
+    ntfy_base_url: str = Field(default="https://ntfy.sh", alias="NTFY_BASE_URL")
+
+    # Email digest
+    smtp_host: str | None = Field(default=None, alias="SMTP_HOST")
+    smtp_port: int = Field(default=587, alias="SMTP_PORT")
+    smtp_user: str | None = Field(default=None, alias="SMTP_USER")
+    smtp_password: str | None = Field(default=None, alias="SMTP_PASSWORD")
+    digest_email: str | None = Field(default=None, alias="DIGEST_EMAIL")
+    digest_webhook_url: str | None = Field(default=None, alias="DIGEST_WEBHOOK_URL")
+
+    # Trakt.tv
+    trakt_client_id: str | None = Field(default=None, alias="TRAKT_CLIENT_ID")
+    trakt_access_token: str | None = Field(default=None, alias="TRAKT_ACCESS_TOKEN")
+
     # Ollama (local, optional)
     ollama_base_url: str | None = Field(default=None, alias="OLLAMA_BASE_URL")
     ollama_model: str = Field(default="llama3.2:1b", alias="OLLAMA_MODEL")

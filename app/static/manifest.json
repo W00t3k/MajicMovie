@@ -1,0 +1,21 @@
+{
+  "name": "Majic Movie Selector",
+  "short_name": "Majic",
+  "description": "AI-powered movie recommendations from 40+ sources",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0f13",
+  "theme_color": "#7c3aed",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/static/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [],
+  "categories": ["entertainment", "lifestyle"],
+  "lang": "en"
+}
