@@ -5315,11 +5315,11 @@ if (yearSlider) {
   yearSlider.max = MAX_YEAR;
   yearSlider.value = CURRENT_YEAR;
 }
-// Default filter to current year on load
-selectedYear = CURRENT_YEAR;
-updateYearDisplay(CURRENT_YEAR);
-if (yearFromEl) yearFromEl.value = CURRENT_YEAR;
-if (yearToEl) yearToEl.value = CURRENT_YEAR;
+// Default to all years — current year has too few movies
+selectedYear = null;
+updateYearDisplay(null);
+if (yearFromEl) yearFromEl.value = "";
+if (yearToEl) yearToEl.value = "";
 
 if (loadAllBtn) {
   loadAllBtn.addEventListener("click", () => {

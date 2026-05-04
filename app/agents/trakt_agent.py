@@ -4,8 +4,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from app.agents.base import BaseAgent, AgentResult
-from app.models import AgentContext, MovieCandidate
+from app.agents.base import MovieAgent
+from app.models import AgentContext, MovieCandidate, SourcePayload
 
 if TYPE_CHECKING:
     pass
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class TraktAgent(BaseAgent):
+class TraktAgent(MovieAgent):
     name = "trakt"
 
     def __init__(
@@ -26,9 +26,9 @@ class TraktAgent(BaseAgent):
         self._access_token = access_token
         self._timeout = timeout_seconds
 
-    async def collect(self, context: AgentContext) -> AgentResult:
+    async def collect(self, context: AgentContext) -> SourcePayload:
         if not self._client_id:
-            return AgentResult(movies=[], metadata={"notes": "Trakt not configured (missing TRAKT_CLIENT_ID)"}, skipped=True)
+            return SourcePayload(metadata={"notes": "Trakt not configured (missing TRAKT_CLIENT_ID)"})
 
         from app.clients.trakt_client import TraktClient
         client = TraktClient(
@@ -96,9 +96,9 @@ class TraktAgent(BaseAgent):
 
         except Exception as exc:
             logger.warning("TraktAgent error: %s", exc)
-            return AgentResult(movies=[], metadata={"error": str(exc)}, skipped=True)
+            return SourcePayload(metadata={"error": str(exc)})
 
-        return AgentResult(
+        return SourcePayload(
             movies=movies,
             metadata={"notes": f"Loaded {len(movies)} movies from Trakt.tv"},
         )
