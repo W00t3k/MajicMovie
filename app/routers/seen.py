@@ -140,11 +140,13 @@ async def rag_query_likes(payload: RagLikesQueryRequest) -> dict:
 
 
 async def _llm_summarize_like_matches(query: str, matches: list[dict]) -> str | None:
-    if not settings.ollama_base_url or not matches:
+    if not matches:
         return None
     try:
-        from app.clients.ollama_client import OllamaClient
-        client = OllamaClient(base_url=settings.ollama_base_url, model=settings.ollama_model, timeout_seconds=20.0)
+        from app import state
+        client = await state.get_llm_client()
+        if not client or not client.available:
+            return None
         sample_lines = []
         for idx, match in enumerate(matches[:8], start=1):
             genres = ", ".join(match.get("genres") or [])

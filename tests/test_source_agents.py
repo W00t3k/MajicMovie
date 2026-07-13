@@ -112,7 +112,7 @@ async def test_releases_agent_uses_fallback_dataset(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rogerebert_agent_filters_to_2025_2026(tmp_path: Path) -> None:
+async def test_rogerebert_agent_uses_seed_dataset_when_rss_fails(tmp_path: Path) -> None:
     dataset = [
         {
             "title": "Past Review",
@@ -137,11 +137,15 @@ async def test_rogerebert_agent_filters_to_2025_2026(tmp_path: Path) -> None:
         timeout_seconds=0.1,
         fallback_dataset_path=dataset_path,
     )
+
+    async def failing_rss(years: set[int] | None = None) -> list[dict]:
+        raise RuntimeError("RSS unavailable")
+
+    agent._client.reviews_from_rss = failing_rss  # type: ignore[method-assign]
     payload = await agent.collect(_context())
 
-    assert len(payload.movies) == 1
-    assert payload.movies[0].title == "Current Review"
-    assert payload.movies[0].year == 2025
+    assert len(payload.movies) == 2
+    assert {m.title for m in payload.movies} == {"Past Review", "Current Review"}
 
 
 def test_rottentomatoes_client_extracts_jsonld_movies() -> None:

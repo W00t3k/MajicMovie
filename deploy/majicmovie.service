@@ -1,0 +1,24 @@
+[Unit]
+Description=Majic Movie recommendation service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust user and paths to your install location
+User=majicmovie
+WorkingDirectory=/opt/majicmovie
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/opt/majicmovie/.env
+ExecStart=/opt/majicmovie/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8443
+Restart=on-failure
+RestartSec=5
+
+# Startup progress and all app logs go to the journal:
+#   journalctl -u majicmovie -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=majicmovie
+
+[Install]
+WantedBy=multi-user.target

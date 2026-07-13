@@ -36,3 +36,8 @@ htmlcov/
 .vscode/
 .idea/
 .claude/
+
+# Editor backups & scratch
+*~
+/new/
+data/memory.db*

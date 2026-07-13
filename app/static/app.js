@@ -308,7 +308,7 @@ const SOURCE_OPTIONS = [
 ];
 
 // Initialize with Usenet sources selected by default (latest available movies)
-const homeSourceSelections = new Set(["nzbgeek", "drunkenslug"]);
+const homeSourceSelections = new Set();
 const calendarSourceSelections = new Set();
 let calendarItems = [];
 let filterDebounceTimer = null;
@@ -2569,8 +2569,14 @@ function getSourceLinks(movie) {
   const year = movie.year || "";
   const titleYear = encodeURIComponent(`${movie.title} ${year}`.trim());
 
+  // YouTube Trailer — first so it always appears on cards
+  links.push({
+    label: "▶",
+    url: `https://www.youtube.com/results?search_query=${titleYear}+trailer`,
+    cls: "trailer",
+  });
+
   // Rotten Tomatoes
-  const rtSlug = (movie.title || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
   links.push({
     label: "RT",
     url: `https://www.rottentomatoes.com/search?search=${title}`,
@@ -2596,13 +2602,6 @@ function getSourceLinks(movie) {
     label: "Letterboxd",
     url: `https://letterboxd.com/search/${title}/`,
     cls: "letterboxd",
-  });
-
-  // YouTube Trailer
-  links.push({
-    label: "Trailer",
-    url: `https://www.youtube.com/results?search_query=${titleYear}+trailer`,
-    cls: "trailer",
   });
 
   return links;
@@ -3047,6 +3046,16 @@ function buildRecommendationCardNode(rec, index) {
     el.addEventListener("click", (e) => { e.stopPropagation(); openMovieModal(rec); });
   });
 
+  const trailerPosterLink = node.querySelector(".trailer-poster-link");
+  const trailerPosterImg = node.querySelector(".trailer-poster-img");
+  if (trailerPosterLink && trailerPosterImg) {
+    trailerPosterLink.href = getTrailerSearchUrl(movie);
+    trailerPosterLink.addEventListener("click", (e) => e.stopPropagation());
+    const posterSrc = (movie.poster_url || "").trim();
+    trailerPosterImg.src = posterSrc || generatedPosterDataUrl(movie);
+    if (posterSrc) trailerPosterImg.onerror = () => { trailerPosterImg.src = generatedPosterDataUrl(movie); };
+  }
+
   const backScore = node.querySelector(".back-score");
   if (backScore) {
     if (scoreText) {
@@ -3095,9 +3104,9 @@ function buildRecommendationCardNode(rec, index) {
       a.href = link.url;
       a.target = "_blank";
       a.rel = "noopener noreferrer";
-      a.textContent = link.label;
       a.className = `source-link ${link.cls}`;
       a.addEventListener("click", (e) => e.stopPropagation());
+      a.textContent = link.label;
       li.appendChild(a);
       sourceLinksEl.appendChild(li);
     });
@@ -3153,7 +3162,16 @@ function buildRecommendationCardNode(rec, index) {
     ) {
       return;
     }
+    const wasFlipped = card.classList.contains("flipped");
+    // Clear active state from any previously active card
+    document.querySelectorAll(".flip-card.clip-active").forEach(c => c.classList.remove("clip-active"));
     card.classList.toggle("flipped");
+    if (!wasFlipped) {
+      card.classList.add("clip-active");
+      window.activeFlipRec = rec;
+    } else {
+      window.activeFlipRec = null;
+    }
   });
 
   // --- Buttons ---
@@ -3268,6 +3286,7 @@ function renderRecommendations(recommendations) {
   resetRecommendationRenderState();
   recsEl.innerHTML = "";
   currentRecommendations = Array.isArray(recommendations) ? recommendations : [];
+  window.currentRecommendations = currentRecommendations;
   renderAiSuggestions();
   if (!currentRecommendations.length) return;
   ensureRecommendationSentinel();
@@ -4863,7 +4882,11 @@ function findRecommendationFromText(raw) {
     .sort((a, b) => b.title.length - a.title.length);
 
   for (const item of candidates) {
-    if (responseText.includes(item.title.toLowerCase())) return item.rec;
+    const t = item.title.toLowerCase();
+    if (responseText.includes(t)) return item.rec;
+    // Fuzzy: all words present in order (handles minor punctuation differences)
+    const words = t.split(/\s+/).filter(w => w.length > 2);
+    if (words.length >= 2 && words.every(w => responseText.includes(w))) return item.rec;
   }
   return null;
 }
@@ -5142,10 +5165,14 @@ async function sendAiMessage(presetMessage = null) {
 
     const responseText = normalizeAiResponse(data.response || "No response");
     addChatMessage(responseText, "assistant", data.sources_queried || []);
-    console.log("AI Response:", data.response);  // Debug
-    const mentionedRec = findRecommendationFromText(data.response);
-    if (mentionedRec) {
-      renderAiFeaturedMovie(mentionedRec, "AI pick");
+    // Use backend-resolved TMDB movie data first; fall back to scanning currentRecommendations
+    if (data.movies && data.movies.length > 0) {
+      renderAiFeaturedMovie(data.movies[0], "AI pick");
+    } else {
+      const mentionedRec = findRecommendationFromText(data.response);
+      if (mentionedRec) {
+        renderAiFeaturedMovie(mentionedRec, "AI pick");
+      }
     }
   } catch (err) {
     loadingMsg.remove();
@@ -5226,7 +5253,7 @@ const loadAllBtn = document.getElementById("load-all-btn");
 
 let selectedYear = null;
 const CURRENT_YEAR = new Date().getFullYear();
-const MAX_YEAR = CURRENT_YEAR + 2;
+const MAX_YEAR = CURRENT_YEAR;
 
 function updateYearDisplay(year) {
   if (!yearDisplay) return;
@@ -5288,7 +5315,7 @@ function handleYearSliderChange() {
 function clearYearFilter() {
   selectedYear = null;
   updateYearDisplay(null);
-  if (yearSlider) yearSlider.value = MAX_YEAR;
+  if (yearSlider) yearSlider.value = CURRENT_YEAR;
   applyYearFilter(null, null);
 }
 
@@ -5315,9 +5342,9 @@ if (yearSlider) {
   yearSlider.max = MAX_YEAR;
   yearSlider.value = CURRENT_YEAR;
 }
-// Default to all years — current year has too few movies
+// Default to all years (no filter) but display current year on slider
 selectedYear = null;
-updateYearDisplay(null);
+updateYearDisplay(CURRENT_YEAR);
 if (yearFromEl) yearFromEl.value = "";
 if (yearToEl) yearToEl.value = "";
 

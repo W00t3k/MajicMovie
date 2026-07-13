@@ -36,11 +36,11 @@ async def test_usenet_client_avoids_double_api_suffix() -> None:
     client = UsenetClient(base_url="https://drunkenslug.com/api", api_key="k", timeout_seconds=0.1)
     seen: dict[str, str] = {}
 
-    async def fake_get_json(url: str, params: dict | None = None, headers: dict | None = None) -> dict:
+    async def fake_get_text(url: str, params: dict | None = None, headers: dict | None = None) -> str:
         seen["url"] = url
-        return {"channel": {"item": []}}
+        return "<rss><channel></channel></rss>"
 
-    client._http.get_json = fake_get_json  # type: ignore[method-assign]
+    client._http.get_text = fake_get_text  # type: ignore[method-assign]
     await client.movie_search(query="")
 
     assert seen["url"] == "https://drunkenslug.com/api"
@@ -55,12 +55,12 @@ async def test_usenet_client_supports_querystring_base_url() -> None:
     )
     seen: dict[str, object] = {}
 
-    async def fake_get_json(url: str, params: dict | None = None, headers: dict | None = None) -> dict:
+    async def fake_get_text(url: str, params: dict | None = None, headers: dict | None = None) -> str:
         seen["url"] = url
         seen["params"] = params or {}
-        return {"channel": {"item": []}}
+        return "<rss><channel></channel></rss>"
 
-    client._http.get_json = fake_get_json  # type: ignore[method-assign]
+    client._http.get_text = fake_get_text  # type: ignore[method-assign]
     await client.movie_search(query="")
 
     assert seen["url"] == "https://drunkenslug.com/api"

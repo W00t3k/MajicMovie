@@ -12,7 +12,6 @@ from starlette.responses import StreamingResponse
 from app import state
 from app.config import limits, settings
 from app.models import RecommendationResponse
-from app.clients.ollama_client import OllamaClient
 from app.clients.tmdb_client import TMDBClient
 from app.services.mood_engine import get_all_moods, get_mood, infer_user_moods
 
@@ -181,7 +180,7 @@ def _prefilter_by_mood_genres(movie_list: list[dict], mood_name: str) -> list[di
 
 
 async def _llm_filter_by_mood(mood, movie_list: list[dict], count: int) -> list[int]:
-    if not settings.ollama_base_url or not movie_list:
+    if not movie_list:
         return []
     prefiltered = _prefilter_by_mood_genres(movie_list, mood.name)
     movies_text_parts = []
@@ -209,7 +208,9 @@ async def _llm_filter_by_mood(mood, movie_list: list[dict], count: int) -> list[
     prompt = f"""Select {count} movies that perfectly match "{mood.display_name}" mood.\n\n{hint}\n\nMovie list:\n{movies_text}\n\nReply with ONLY the numbers of your selections, separated by commas.\nExample: 0, 3, 7, 12\n\nSelected movies:"""
 
     try:
-        client = OllamaClient(base_url=settings.ollama_base_url, model=settings.ollama_model, timeout_seconds=30.0)
+        client = await state.get_llm_client()
+        if not client or not client.available:
+            return []
         response = await client.generate(prompt=prompt, system="You are a movie expert. Output only comma-separated numbers. No explanations.")
         indices: list[int] = []
         clean_response = "".join(c if c.isdigit() or c in ", \n" else " " for c in response)
@@ -476,15 +477,16 @@ async def get_trailer(title: str = Query(...), year: int | None = Query(default=
 @router.get("/api/search")
 async def search_movies(q: str = Query(..., min_length=1), ai: bool = Query(default=False)) -> dict:
     query = q.strip()
-    if ai and settings.ollama_base_url:
+    if ai:
         try:
-            ollama = OllamaClient(base_url=settings.ollama_base_url, model=settings.ollama_model, timeout_seconds=5.0)
-            ai_prompt = f"""User is searching for movies with this query: "{query}"\n\nIf this is a natural language request, respond with 3-5 specific movie title suggestions, one per line.\nIf this is already a movie title, just respond with that title.\nOnly respond with movie titles, nothing else."""
-            ai_response = await ollama.generate(ai_prompt)
-            if ai_response:
-                ai_titles = [line.strip() for line in ai_response.strip().split("\n") if line.strip()]
-                if ai_titles:
-                    query = ai_titles[0]
+            llm = await state.get_llm_client()
+            if llm and llm.available:
+                ai_prompt = f"""User is searching for movies with this query: "{query}"\n\nIf this is a natural language request, respond with 3-5 specific movie title suggestions, one per line.\nIf this is already a movie title, just respond with that title.\nOnly respond with movie titles, nothing else."""
+                ai_response = await llm.generate(ai_prompt)
+                if ai_response:
+                    ai_titles = [line.strip() for line in ai_response.strip().split("\n") if line.strip()]
+                    if ai_titles:
+                        query = ai_titles[0]
         except Exception:
             pass
 

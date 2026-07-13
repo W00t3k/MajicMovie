@@ -322,7 +322,8 @@ async def test_recommender_merges_normalized_titles_and_streaming_data(tmp_path:
     assert movie.best_picture is True
     assert movie.available_on_plex is True
     assert "Plex" in movie.streaming_availability
-    assert any("Cross-source agreement" in line for line in movie.evidence)
+    assert any("Best Picture" in line for line in movie.evidence)
+    assert any("Plex" in line for line in movie.evidence)
 
 
 @pytest.mark.asyncio

@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
     groq_model: str = Field(default="llama-3.3-70b-versatile", alias="GROQ_MODEL")
 
+    # Active LLM provider: "auto" (groq → ollama fallback), "groq", or "ollama"
+    llm_provider: str = Field(default="auto", alias="LLM_PROVIDER")
+
     # Qdrant Cloud (RAG vector database)
     qdrant_url: str | None = Field(default=None, alias="QDRANT_URL")
     qdrant_api_key: str | None = Field(default=None, alias="QDRANT_API_KEY")

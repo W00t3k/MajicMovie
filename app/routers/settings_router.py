@@ -56,12 +56,13 @@ ENV_KEY_MAP: dict[str, str] = {
     "ollama_model": "OLLAMA_MODEL",
     "groq_api_key": "GROQ_API_KEY",
     "groq_model": "GROQ_MODEL",
+    "llm_provider": "LLM_PROVIDER",
 }
 
 OPTIONAL_FIELDS = {
     "tmdb_api_key", "rottentomatoes_list_url", "releases_url", "plex_token", "radarr_api_key",
     "nzbgeek_rss_url", "nzbgeek_api_key", "drunkenslug_api_key", "usenet_api_key",
-    "ollama_model", "groq_api_key", "groq_model",
+    "ollama_model", "groq_api_key", "groq_model", "llm_provider",
 }
 
 
@@ -85,6 +86,7 @@ class IntegrationSettingsPayload(BaseModel):
     ollama_model: str | None = None
     groq_api_key: str | None = None
     groq_model: str | None = None
+    llm_provider: str | None = None
     google_client_id: str | None = None
     google_client_secret: str | None = None
 
@@ -136,6 +138,7 @@ def to_public_settings_values() -> dict[str, str]:
         "ollama_model": settings.ollama_model or DEFAULT_URLS["ollama_model"],
         "groq_api_key": settings.groq_api_key or "",
         "groq_model": settings.groq_model or "llama-3.3-70b-versatile",
+        "llm_provider": settings.llm_provider or "auto",
     }
 
 

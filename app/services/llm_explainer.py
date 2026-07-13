@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.clients.ollama_client import OllamaClient
+from app.clients.llm_client import UnifiedLLMClient
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -14,19 +14,22 @@ logger = logging.getLogger(__name__)
 class LLMExplainer:
     """Generate natural language explanations for movie recommendations."""
 
-    def __init__(self, ollama_client: OllamaClient | None = None):
-        self._client = ollama_client
+    def __init__(self) -> None:
+        pass
 
     @property
-    def client(self) -> OllamaClient | None:
-        """Lazy-load Ollama client."""
-        if self._client is None and settings.ollama_base_url:
-            self._client = OllamaClient(
-                base_url=settings.ollama_base_url,
-                model=settings.ollama_model,
-                timeout_seconds=30.0,
-            )
-        return self._client
+    def client(self) -> UnifiedLLMClient | None:
+        """Build LLM client from current settings (respects active provider)."""
+        configured = settings.llm_provider or "auto"
+        effective_provider = None if configured == "auto" else configured
+        client = UnifiedLLMClient(
+            groq_api_key=settings.groq_api_key,
+            groq_model=settings.groq_model,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
+            prefer_provider=effective_provider,
+        )
+        return client if client.available else None
 
     async def explain_recommendation(
         self,
@@ -73,7 +76,7 @@ class LLMExplainer:
     ) -> str:
         """Generate explanation using Ollama."""
         if not self.client:
-            raise RuntimeError("Ollama client not available")
+            raise RuntimeError("LLM client not available")
 
         # Format reasons for the prompt
         reasons_text = "\n".join(
@@ -213,7 +216,7 @@ Write a friendly explanation of why this movie was recommended. Focus on the mos
     ) -> str:
         """Generate personalized reason using Ollama."""
         if not self.client:
-            raise RuntimeError("Ollama client not available")
+            raise RuntimeError("LLM client not available")
 
         year_text = f" ({movie_year})" if movie_year else ""
         genre_text = f"Genres: {', '.join(movie_genres)}" if movie_genres else ""

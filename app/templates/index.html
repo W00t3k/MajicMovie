@@ -11,7 +11,7 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@400;600;700;800&family=Outfit:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=20260322a" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260504b" />
     <link rel="manifest" href="/static/manifest.json" />
     <meta name="theme-color" content="#7c3aed" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -429,8 +429,14 @@
           </div>
           <div class="flip-card-back">
             <div class="flip-back-header">
-              <div class="title clickable-title"></div>
-              <div class="score-badge score back-score"></div>
+              <a class="trailer-poster-link" target="_blank" rel="noopener noreferrer">
+                <img class="trailer-poster-img" alt="Watch on YouTube" />
+                <span class="trailer-poster-play">▶</span>
+              </a>
+              <div class="back-header-text">
+                <div class="title clickable-title"></div>
+                <div class="score-badge score back-score"></div>
+              </div>
             </div>
             <p class="meta back-meta"></p>
             <div class="source-origin back-source-origin"></div>
@@ -630,7 +636,7 @@
       </div>
     </div>
 
-    <script src="/static/app.js?v=20260311c" defer></script>
+    <script src="/static/app.js?v=20260504b" defer></script>
 
     <!-- Sidebar Collapse + Resize -->
     <script>
@@ -710,16 +716,33 @@
     <div class="clippy-widget" id="clippy-widget">
       <div class="clippy-bubble" id="clippy-bubble">
         <div class="clippy-bubble-header">
-          <span class="clippy-bubble-title">🎬 What movie are you looking for?</span>
-          <button class="clippy-bubble-close" id="clippy-close" title="Dismiss">✕</button>
+          <span class="clippy-bubble-title" id="clippy-title">🎬 What movie are you looking for?</span>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <button class="clippy-bubble-close" id="clippy-back" title="Back" hidden>←</button>
+            <button class="clippy-bubble-close" id="clippy-close" title="Dismiss">✕</button>
+          </div>
         </div>
-        <div class="clippy-selection-preview" id="clippy-preview"></div>
-        <div class="clippy-actions">
-          <button class="clippy-action-btn primary" id="clippy-search-btn">Search</button>
-          <button class="clippy-action-btn ghost" id="clippy-chat-btn">Ask AI</button>
-          <button class="clippy-action-btn explain" id="clippy-explain-btn">✨ Explain</button>
+
+        <!-- Quick-actions view -->
+        <div id="clippy-quick-view">
+          <div class="clippy-selection-preview" id="clippy-preview"></div>
+          <div class="clippy-actions">
+            <button class="clippy-action-btn primary" id="clippy-search-btn">Search</button>
+            <button class="clippy-action-btn ghost" id="clippy-chat-btn">Ask AI</button>
+            <button class="clippy-action-btn explain" id="clippy-explain-btn">✨ Explain</button>
+          </div>
+          <div class="clippy-explain-result" id="clippy-explain-result" hidden></div>
         </div>
-        <div class="clippy-explain-result" id="clippy-explain-result" hidden></div>
+
+        <!-- Inline chat view -->
+        <div id="clippy-chat-view" hidden>
+          <div id="clippy-chat-messages" class="clippy-chat-messages"></div>
+          <div class="clippy-chat-movie" id="clippy-chat-movie" hidden></div>
+          <div class="clippy-chat-input-row">
+            <input type="text" id="clippy-chat-input" class="clippy-chat-input" placeholder="Ask anything about movies..." autocomplete="off" />
+            <button id="clippy-chat-send" class="clippy-chat-send-btn">→</button>
+          </div>
+        </div>
       </div>
       <button class="clippy-btn" id="clippy-btn" title="Movie helper">
         🎬
@@ -729,26 +752,87 @@
 
     <script>
     (function() {
-      const widget = document.getElementById('clippy-widget');
-      const bubble = document.getElementById('clippy-bubble');
-      const btn    = document.getElementById('clippy-btn');
-      const closeBtn = document.getElementById('clippy-close');
-      const preview  = document.getElementById('clippy-preview');
-      const searchBtn = document.getElementById('clippy-search-btn');
-      const chatBtn      = document.getElementById('clippy-chat-btn');
-      const explainBtn   = document.getElementById('clippy-explain-btn');
+      const widget      = document.getElementById('clippy-widget');
+      const bubble      = document.getElementById('clippy-bubble');
+      const btn         = document.getElementById('clippy-btn');
+      const closeBtn    = document.getElementById('clippy-close');
+      const backBtn     = document.getElementById('clippy-back');
+      const titleEl     = document.getElementById('clippy-title');
+      const preview     = document.getElementById('clippy-preview');
+      const searchBtn   = document.getElementById('clippy-search-btn');
+      const chatBtn     = document.getElementById('clippy-chat-btn');
+      const explainBtn  = document.getElementById('clippy-explain-btn');
       const explainResult = document.getElementById('clippy-explain-result');
+      const quickView   = document.getElementById('clippy-quick-view');
+      const chatView    = document.getElementById('clippy-chat-view');
+      const chatMessages = document.getElementById('clippy-chat-messages');
+      const chatInput   = document.getElementById('clippy-chat-input');
+      const chatSend    = document.getElementById('clippy-chat-send');
+      const chatMovie   = document.getElementById('clippy-chat-movie');
 
       let selectedText = '';
       let hideTimer = null;
+      let chatHistory = [];
+      let chatBusy = false;
 
+      // ── active flip card helper ─────────────────────────────────────────
+      function getActiveRec() {
+        return window.activeFlipRec || null;
+      }
+      function getActiveMovie() {
+        const rec = getActiveRec();
+        if (!rec) return null;
+        return (rec && rec.movie) ? rec.movie : rec;
+      }
+
+      // ── view switching ──────────────────────────────────────────────────
+      function showQuickView() {
+        quickView.hidden = false;
+        chatView.hidden = true;
+        backBtn.hidden = true;
+        const m = getActiveMovie();
+        titleEl.textContent = m ? '🎬 ' + m.title : '🎬 What movie are you looking for?';
+      }
+
+      function showChatView(prefill) {
+        quickView.hidden = true;
+        chatView.hidden = false;
+        backBtn.hidden = false;
+        const m = getActiveMovie();
+        titleEl.textContent = m ? '🤖 Ask about ' + m.title : '🤖 AI Chat';
+        clearTimeout(hideTimer);
+        if (prefill !== undefined && prefill !== null) {
+          chatInput.value = prefill;
+        }
+        chatInput.focus();
+      }
+
+      // ── bubble show/hide ────────────────────────────────────────────────
       function showBubble(text) {
-        selectedText = text.trim().slice(0, 80);
-        preview.textContent = selectedText || '...';
+        const m = getActiveMovie();
+        if (m) {
+          // Active flip card takes priority over text selection
+          selectedText = m.title;
+          preview.textContent = '🎬 ' + m.title + (m.year ? ' (' + m.year + ')' : '');
+          titleEl.textContent = '🎬 ' + m.title;
+        } else {
+          selectedText = (text || '').trim().slice(0, 80);
+          preview.textContent = selectedText || '...';
+          titleEl.textContent = '🎬 What movie are you looking for?';
+        }
+        showQuickView();
+        explainResult.hidden = true;
+        explainResult.textContent = '';
         bubble.classList.add('visible');
         btn.classList.add('has-selection');
         clearTimeout(hideTimer);
         hideTimer = setTimeout(hideBubble, 12000);
+      }
+
+      function showChatBubble(prefill) {
+        bubble.classList.add('visible');
+        btn.classList.remove('has-selection');
+        showChatView(prefill);
       }
 
       function hideBubble() {
@@ -757,29 +841,81 @@
         selectedText = '';
         explainResult.hidden = true;
         explainResult.textContent = '';
+        showQuickView();
       }
 
-      document.addEventListener('mouseup', function(e) {
-        if (widget.contains(e.target)) return;
-        setTimeout(function() {
-          const sel = window.getSelection();
-          const text = sel ? sel.toString().trim() : '';
-          if (text.length > 1) {
-            showBubble(text);
+      // ── chat logic ──────────────────────────────────────────────────────
+      function addChatMsg(text, role) {
+        const d = document.createElement('div');
+        d.className = 'clippy-msg clippy-msg-' + role;
+        d.textContent = text;
+        chatMessages.appendChild(d);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        return d;
+      }
+
+      function showMovieCard(movie) {
+        if (!movie || !movie.title) { chatMovie.hidden = true; return; }
+        chatMovie.hidden = false;
+        chatMovie.innerHTML = '';
+        if (movie.poster_url) {
+          const img = document.createElement('img');
+          img.src = movie.poster_url;
+          img.alt = movie.title;
+          img.className = 'clippy-movie-poster';
+          img.onerror = () => img.remove();
+          chatMovie.appendChild(img);
+        }
+        const info = document.createElement('div');
+        info.className = 'clippy-movie-info';
+        info.innerHTML = '<strong>' + movie.title + '</strong>' + (movie.year ? ' <span>(' + movie.year + ')</span>' : '');
+        chatMovie.appendChild(info);
+      }
+
+      async function sendChatMessage() {
+        const msg = chatInput.value.trim();
+        if (!msg || chatBusy) return;
+        chatBusy = true;
+        chatInput.value = '';
+        chatSend.disabled = true;
+        addChatMsg(msg, 'user');
+        chatHistory.push({ role: 'user', content: msg });
+        const thinking = addChatMsg('…', 'thinking');
+        try {
+          const res = await fetch('/api/ai/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: msg, context: '' })
+          });
+          const data = await res.json();
+          thinking.remove();
+          const reply = (data.response || 'No response').trim();
+          addChatMsg(reply, 'assistant');
+          chatHistory.push({ role: 'assistant', content: reply });
+          if (data.movies && data.movies.length > 0) {
+            showMovieCard(data.movies[0]);
+          } else {
+            chatMovie.hidden = true;
           }
-        }, 10);
+        } catch(err) {
+          thinking.remove();
+          addChatMsg('Error: ' + err.message, 'error');
+        } finally {
+          chatBusy = false;
+          chatSend.disabled = false;
+          chatInput.focus();
+        }
+      }
+
+      // ── event listeners ─────────────────────────────────────────────────
+      chatSend.addEventListener('click', sendChatMessage);
+      chatInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); }
       });
 
-      document.addEventListener('selectionchange', function() {
-        const sel = window.getSelection();
-        if (!sel || sel.toString().trim().length === 0) {
-          clearTimeout(hideTimer);
-          hideTimer = setTimeout(function() {
-            if (!window.getSelection() || !window.getSelection().toString().trim()) {
-              hideBubble();
-            }
-          }, 800);
-        }
+      backBtn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        showQuickView();
       });
 
       closeBtn.addEventListener('click', function(e) {
@@ -790,14 +926,36 @@
       btn.addEventListener('click', function() {
         if (bubble.classList.contains('visible')) {
           hideBubble();
+          return;
+        }
+        const activeM = getActiveMovie();
+        if (activeM) {
+          // Flip card is open — go straight to chat about that movie
+          const prefill = 'Why should I watch "' + activeM.title + '"' + (activeM.year ? ' (' + activeM.year + ')' : '') + '?';
+          showChatBubble(prefill);
         } else if (selectedText) {
           showBubble(selectedText);
         } else {
-          const chatCard = document.getElementById('ai-chat-card');
-          if (chatCard) {
-            chatCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            const inp = document.getElementById('ai-chat-input') || document.querySelector('.ai-input');
-            if (inp) inp.focus();
+          // Show top downloadable movies
+          const recs = window.currentRecommendations || [];
+          const downloadable = recs.filter(r => {
+            const m = r && r.movie ? r.movie : r;
+            return m && (m.available_on_usenet || (m.source_tags || []).some(t =>
+              ['nzbgeek','drunkenslug','usenet','nzbgeek-rss'].includes(String(t).toLowerCase())
+            ));
+          }).slice(0, 3);
+
+          if (downloadable.length > 0) {
+            showQuickView();
+            const titles = downloadable.map(r => {
+              const m = r && r.movie ? r.movie : r;
+              return m.title + (m.year ? ' (' + m.year + ')' : '');
+            }).join(', ');
+            preview.textContent = '📥 Available: ' + titles;
+            bubble.classList.add('visible');
+            clearTimeout(hideTimer);
+          } else {
+            showChatBubble('');
           }
         }
       });
@@ -817,22 +975,21 @@
       });
 
       chatBtn.addEventListener('click', function() {
-        if (!selectedText) return;
-        const chatCard = document.getElementById('ai-chat-card');
-        const chatInput = document.getElementById('ai-chat-input') || document.querySelector('.ai-input');
-        if (chatInput) {
-          chatInput.value = 'Tell me about: ' + selectedText;
-          chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-          chatInput.focus();
-          if (chatCard) chatCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const m = getActiveMovie();
+        if (m) {
+          const prefill = 'Why should I watch "' + m.title + '"' + (m.year ? ' (' + m.year + ')' : '') + '?';
+          showChatView(prefill);
         } else {
-          window.open('/chat?q=' + encodeURIComponent(selectedText), '_blank');
+          showChatView(selectedText ? 'Tell me about: ' + selectedText : '');
         }
-        hideBubble();
       });
 
       explainBtn.addEventListener('click', async function() {
-        if (!selectedText) return;
+        const m = getActiveMovie();
+        const subject = m
+          ? '"' + m.title + '"' + (m.year ? ' (' + m.year + ')' : '')
+          : selectedText;
+        if (!subject) return;
         explainBtn.disabled = true;
         explainBtn.textContent = '...';
         explainResult.hidden = false;
@@ -843,22 +1000,44 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              message: 'Briefly explain this in movie context (2-3 sentences max): ' + selectedText,
+              message: m
+                ? 'Give a 2-3 sentence pitch for why someone should watch ' + subject + '. Be specific and engaging.'
+                : 'Briefly explain this in movie context (2-3 sentences max): ' + subject,
               history: []
             })
           });
           const data = await res.json();
           const reply = (data.response || '').trim() || 'No response from AI.';
           explainResult.textContent = reply;
-          const providerEl = document.getElementById('nav-ai-provider');
-          if (data.provider && providerEl) {
-            providerEl.dataset.provider = data.provider;
-          }
         } catch(err) {
           explainResult.textContent = 'Error: ' + err.message;
         } finally {
           explainBtn.disabled = false;
           explainBtn.textContent = '✨ Explain';
+        }
+      });
+
+      // Show bubble on text selection
+      document.addEventListener('mouseup', function(e) {
+        if (widget.contains(e.target)) return;
+        // Ignore clicks on interactive elements — avoids capturing button labels
+        if (e.target.closest('button, a, input, select, textarea, label, [role="button"]')) return;
+        setTimeout(function() {
+          const sel = window.getSelection();
+          const text = sel ? sel.toString().trim() : '';
+          // Require at least 3 chars and not pure punctuation/numbers
+          if (text.length > 2 && /[a-zA-Z]/.test(text)) showBubble(text);
+        }, 10);
+      });
+
+      document.addEventListener('selectionchange', function() {
+        const sel = window.getSelection();
+        if (!sel || sel.toString().trim().length === 0) {
+          clearTimeout(hideTimer);
+          hideTimer = setTimeout(function() {
+            if (!chatView.hidden) return; // keep open if in chat mode
+            if (!window.getSelection() || !window.getSelection().toString().trim()) hideBubble();
+          }, 800);
         }
       });
     })();

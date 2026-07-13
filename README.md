@@ -1,4 +1,4 @@
-# Majic Movie Selector
+# MajicMovie
 
 Agentic movie recommendation engine and web app that:
 
@@ -59,7 +59,7 @@ All integrations are optional. If keys are missing, agents are marked `skipped` 
 - `TMDB_API_KEY`: live upcoming releases from TMDB
 - `ROTTENTOMATOES_LIST_URL`: Rotten Tomatoes browse page parsed via JSON-LD
 - `RELEASES_URL`: Releases.com upcoming page (falls back to local seed if blocked)
-- `ROGEREBERT_REVIEWS_URL`: RogerEbert reviews source (filtered to 2025/2026)
+- `ROGEREBERT_REVIEWS_URL`: RogerEbert reviews source (year range configurable via `LIMITS_MIN_YEAR` / `LIMITS_MAX_YEAR`)
 - `PLEX_BASE_URL` + `PLEX_TOKEN`: Plex library availability
 - `RADARR_BASE_URL` + `RADARR_API_KEY`: Radarr tracked movies
 - `NZBGEEK_RSS_URL` + `NZBGEEK_API_KEY`: NZBGeek RSS movie feed discovery
@@ -146,7 +146,37 @@ Feedback body:
 ./scripts/test.sh
 ```
 
-## 7. What to Productionize Next
+## 7. Run as a Service
+
+### Linux (systemd + journalctl)
+
+Install the app under `/opt/majicmovie` (or edit paths in the unit), then:
+
+```bash
+sudo cp deploy/majicmovie.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now majicmovie
+```
+
+Watch startup progress and live logs via the journal:
+
+```bash
+journalctl -u majicmovie -f          # follow live logs
+journalctl -u majicmovie -b         # everything since boot
+systemctl status majicmovie         # current state + recent lines
+```
+
+### macOS (launchd)
+
+Edit paths in `deploy/com.majicmovie.plist`, then:
+
+```bash
+cp deploy/com.majicmovie.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.majicmovie.plist
+tail -f /tmp/majicmovie.log         # startup progress + live logs
+```
+
+## 8. What to Productionize Next
 
 1. Replace seed datasets with scheduled sync jobs for full Oscars and Criterion catalogs.
 2. Add auth and per-user accounts.

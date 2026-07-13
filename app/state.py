@@ -41,16 +41,23 @@ async def reload_runtime() -> None:
 
 
 async def get_llm_client(provider: str | None = None):
-    """Return a UnifiedLLMClient (Groq → Ollama fallback)."""
+    """Return a UnifiedLLMClient using configured or overridden provider.
+
+    provider arg overrides settings.llm_provider (used by MCP per-request selection).
+    """
     from app.config import settings
     from app.clients.llm_client import UnifiedLLMClient
     try:
+        configured = settings.llm_provider or "auto"
+        effective_provider = provider if provider is not None else (
+            None if configured == "auto" else configured
+        )
         return UnifiedLLMClient(
             groq_api_key=settings.groq_api_key,
             groq_model=settings.groq_model,
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
-            prefer_provider=provider,
+            prefer_provider=effective_provider,
         )
     except Exception:
         return None

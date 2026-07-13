@@ -630,7 +630,16 @@
 
       const poster = document.createElement('div');
       poster.className = 'movie-card-poster';
-      poster.textContent = '🎬';
+      if (movie.poster_url) {
+        const img = document.createElement('img');
+        img.src = movie.poster_url;
+        img.alt = movie.title;
+        img.style.cssText = 'width:100%;height:100%;object-fit:cover;border-radius:inherit;';
+        img.onerror = () => { poster.textContent = '🎬'; };
+        poster.appendChild(img);
+      } else {
+        poster.textContent = '🎬';
+      }
 
       const info = document.createElement('div');
       info.className = 'movie-card-info';
@@ -802,7 +811,10 @@
         hideTyping();
 
         if (data.response) {
-          const movies = extractMovies(data.response);
+          // Use backend TMDB-resolved movies; fall back to regex extraction
+          const movies = (data.movies && data.movies.length > 0)
+            ? data.movies
+            : extractMovies(data.response);
           addMessage('assistant', data.response, movies);
           conversationHistory.push({ role: 'assistant', content: data.response });
         } else {
