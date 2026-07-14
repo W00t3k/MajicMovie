@@ -111,6 +111,19 @@ class Settings(BaseSettings):
     # Active LLM provider: "auto" (groq → ollama fallback), "groq", or "ollama"
     llm_provider: str = Field(default="auto", alias="LLM_PROVIDER")
 
+    # whisper.cpp speech-to-text (local voice search)
+    whisper_bin: str = Field(default="whisper-cli", alias="WHISPER_BIN")
+    whisper_model_path: Path = Field(
+        default=Path("data/models/ggml-base.en.bin"), alias="WHISPER_MODEL_PATH"
+    )
+
+    # mflux local AI poster generation (FLUX on Apple MLX)
+    mflux_bin: str = Field(
+        default="/Users/wootock/.venvs/mflux/bin/mflux-generate", alias="MFLUX_BIN"
+    )
+    mflux_model: str = Field(default="schnell", alias="MFLUX_MODEL")
+    mflux_steps: int = Field(default=4, alias="MFLUX_STEPS")
+
     # Qdrant Cloud (RAG vector database)
     qdrant_url: str | None = Field(default=None, alias="QDRANT_URL")
     qdrant_api_key: str | None = Field(default=None, alias="QDRANT_API_KEY")

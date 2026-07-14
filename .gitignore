@@ -41,3 +41,5 @@ htmlcov/
 *~
 /new/
 data/memory.db*
+data/models/
+data/posters/

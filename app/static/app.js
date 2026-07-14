@@ -3178,6 +3178,47 @@ function buildRecommendationCardNode(rec, index) {
   const likeBtn = node.querySelector(".like");
   const dlBtn = node.querySelector(".download");
 
+  const posterBtn = node.querySelector(".ai-poster");
+  if (posterBtn) {
+    posterBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (posterBtn.disabled) return;
+      posterBtn.disabled = true;
+      posterBtn.textContent = "⏳";
+      try {
+        const res = await fetch("/api/posters/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title: movie.title, year: movie.year, genres: movie.genres || [] }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "generate failed");
+        let posterUrl = data.poster_url;
+        if (!posterUrl && data.slug) {
+          // Poll until FLUX finishes (first run also downloads model weights)
+          for (let i = 0; i < 360 && !posterUrl; i++) {
+            await new Promise((r) => setTimeout(r, 5000));
+            const jr = await fetch(`/api/posters/job/${data.slug}`);
+            const jd = await jr.json();
+            if (jd.status === "done") posterUrl = jd.poster_url;
+            if (String(jd.status).startsWith("error")) throw new Error(jd.status);
+          }
+        }
+        if (posterUrl && imageEl) {
+          imageEl.src = posterUrl;
+          if (trailerPosterImg) trailerPosterImg.src = posterUrl;
+          posterBtn.textContent = "✓";
+        } else {
+          throw new Error("timed out");
+        }
+      } catch (err) {
+        console.error("AI poster failed:", err);
+        posterBtn.textContent = "🎨";
+        posterBtn.disabled = false;
+      }
+    });
+  }
+
   likeBtn.addEventListener("click", async (e) => {
     e.stopPropagation();
     if (likeBtn.disabled) return;
@@ -4090,6 +4131,72 @@ document.addEventListener("click", (e) => {
     closeSearch();
   }
 });
+
+// ── Voice search (whisper.cpp) ─────────────────────────────────────────────────
+
+const voiceSearchBtn = document.getElementById("voice-search-btn");
+let voiceRecorder = null;
+let voiceChunks = [];
+
+async function initVoiceSearch() {
+  if (!voiceSearchBtn || !navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) return;
+  try {
+    const res = await fetch("/api/transcribe/status");
+    const status = await res.json();
+    if (status.available) voiceSearchBtn.hidden = false;
+  } catch { /* whisper not available - keep button hidden */ }
+}
+
+async function startVoiceRecording() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  voiceChunks = [];
+  voiceRecorder = new MediaRecorder(stream);
+  voiceRecorder.ondataavailable = (e) => { if (e.data.size) voiceChunks.push(e.data); };
+  voiceRecorder.onstop = async () => {
+    stream.getTracks().forEach((t) => t.stop());
+    voiceSearchBtn.classList.remove("recording");
+    voiceSearchBtn.classList.add("transcribing");
+    voiceSearchBtn.textContent = "…";
+    try {
+      const blob = new Blob(voiceChunks, { type: voiceRecorder.mimeType || "audio/webm" });
+      const form = new FormData();
+      form.append("audio", blob, "voice.webm");
+      const res = await fetch("/api/transcribe", { method: "POST", body: form });
+      const data = await res.json();
+      if (res.ok && data.text && movieSearchInput) {
+        movieSearchInput.value = data.text;
+        movieSearchInput.dispatchEvent(new Event("input", { bubbles: true }));
+        movieSearchInput.focus();
+      }
+    } catch (err) {
+      console.error("Voice transcription failed:", err);
+    } finally {
+      voiceSearchBtn.classList.remove("transcribing");
+      voiceSearchBtn.textContent = "🎙";
+      voiceRecorder = null;
+    }
+  };
+  voiceRecorder.start();
+  voiceSearchBtn.classList.add("recording");
+  voiceSearchBtn.textContent = "⏹";
+}
+
+if (voiceSearchBtn) {
+  voiceSearchBtn.addEventListener("click", async () => {
+    if (voiceRecorder && voiceRecorder.state === "recording") {
+      voiceRecorder.stop();
+      return;
+    }
+    if (voiceSearchBtn.classList.contains("transcribing")) return;
+    try {
+      await startVoiceRecording();
+    } catch (err) {
+      console.error("Microphone access failed:", err);
+      voiceSearchBtn.title = "Microphone blocked - use localhost or HTTPS";
+    }
+  });
+  initVoiceSearch();
+}
 
 window.addEventListener("scroll", () => {
   if (!recommendationScrollActivated && window.scrollY > 0) {

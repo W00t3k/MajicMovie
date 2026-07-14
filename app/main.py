@@ -252,11 +252,11 @@ app.include_router(auth_router)
 # ── Routers ────────────────────────────────────────────────────────────────────
 
 from app.routers import pages, chat, settings_router, servers, seen  # noqa: E402
-from app.routers import usenet, downloads, plex, recommendations, admin, mcp, backup  # noqa: E402
+from app.routers import usenet, downloads, plex, recommendations, admin, mcp, backup, transcribe, posters  # noqa: E402
 
 pages.set_templates(templates)
 
-for _router_module in (pages, chat, settings_router, servers, seen, usenet, downloads, plex, recommendations, admin, mcp, backup):
+for _router_module in (pages, chat, settings_router, servers, seen, usenet, downloads, plex, recommendations, admin, mcp, backup, transcribe, posters):
     app.include_router(_router_module.router)
 
 
